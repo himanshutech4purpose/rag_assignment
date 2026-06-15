@@ -14,7 +14,6 @@ from app.models.schemas import (
     ConversationWithMessages,
     ConversationsList,
 )
-from app.services.embeddings import embed
 from app.services.llm import answer_question, stream_answer
 from app.services.vector_store import has_chunks, search_chunks
 
@@ -62,7 +61,13 @@ async def get_conversation(conversation_id: str):
             "SELECT id, role, content, sources, created_at FROM messages WHERE conversation_id = $1 ORDER BY id ASC",
             conversation_id,
         )
-    return {**dict(conv), "messages": [dict(m) for m in messages]}
+    parsed_messages = []
+    for m in messages:
+        msg = dict(m)
+        if isinstance(msg.get("sources"), str):
+            msg["sources"] = json.loads(msg["sources"])
+        parsed_messages.append(msg)
+    return {**dict(conv), "messages": parsed_messages}
 
 
 @router.delete("/conversations/{conversation_id}")
@@ -113,11 +118,16 @@ async def ask_question(conversation_id: str, body: AskRequest):
         )
     history = list(reversed(history))
 
-    query_embedding = embed([body.question])[0]
-    chunks = await search_chunks(pool, query_embedding, settings.top_k)
-    chunks = [dict(c) for c in chunks]
+    chunks = await search_chunks(pool, body.question, settings.top_k)
 
-    answer = answer_question(body.question, chunks, history)
+    answer = answer_question(
+        body.question,
+        chunks,
+        history,
+        provider=body.provider,
+        model=body.model,
+        api_key=body.api_key,
+    )
 
     async with pool.acquire() as conn:
         await conn.execute(
@@ -169,14 +179,19 @@ async def ask_stream(conversation_id: str, body: AskRequest):
         )
     history = list(reversed(history))
 
-    query_embedding = embed([body.question])[0]
-    chunks = await search_chunks(pool, query_embedding, settings.top_k)
-    chunks = [dict(c) for c in chunks]
+    chunks = await search_chunks(pool, body.question, settings.top_k)
 
     async def event_generator():
         answer_parts = []
         try:
-            async for token in stream_answer(body.question, chunks, history):
+            async for token in stream_answer(
+                body.question,
+                chunks,
+                history,
+                provider=body.provider,
+                model=body.model,
+                api_key=body.api_key,
+            ):
                 answer_parts.append(token)
                 yield f"data: {token}\n\n"
 

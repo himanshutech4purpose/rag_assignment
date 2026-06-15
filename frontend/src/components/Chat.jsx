@@ -43,6 +43,10 @@ export default function Chat({ conversationId, onConversationsChange }) {
     }
 
     const currentQuestion = question;
+    const provider = localStorage.getItem('llm_provider') || 'groq';
+    const model = localStorage.getItem('llm_model') || undefined;
+    const apiKey = localStorage.getItem('llm_api_key') || undefined;
+
     setQuestion('');
     setLoading(true);
     setStreaming(true);
@@ -51,6 +55,9 @@ export default function Chat({ conversationId, onConversationsChange }) {
     setPartialSources([]);
 
     await streamQuestion(convId, currentQuestion, {
+      provider,
+      model,
+      apiKey,
       onToken: (token) => setPartialAnswer((prev) => prev + token),
       onSources: (sources) => setPartialSources(sources),
       onDone: () => {

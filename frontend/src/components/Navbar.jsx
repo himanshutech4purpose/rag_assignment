@@ -25,6 +25,9 @@ export default function Navbar() {
             <NavLink to="/chat" className={linkClass}>
               Chat
             </NavLink>
+            <NavLink to="/settings" className={linkClass}>
+              Settings
+            </NavLink>
           </div>
         </div>
       </div>

@@ -19,12 +19,21 @@ export const listConversations = () => api.get('/conversations');
 export const getConversation = (id) => api.get(`/conversations/${id}`);
 export const deleteConversation = (id) => api.delete(`/conversations/${id}`);
 
-export async function streamQuestion(conversationId, question, { onToken, onSources, onDone, onError }) {
+export async function streamQuestion(
+  conversationId,
+  question,
+  { provider, model, apiKey, onToken, onSources, onDone, onError }
+) {
   try {
     const response = await fetch(`${API_BASE}/conversations/${conversationId}/ask/stream`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ question }),
+      body: JSON.stringify({
+        question,
+        provider: provider || 'groq',
+        model: model || undefined,
+        api_key: apiKey?.trim() || undefined,
+      }),
     });
     if (!response.ok) {
       onError(new Error(`HTTP ${response.status}`));

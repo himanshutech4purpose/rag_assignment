@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 from uuid import UUID
 
 from pydantic import BaseModel
@@ -57,6 +57,9 @@ class ConversationWithMessages(ConversationOut):
 
 class AskRequest(BaseModel):
     question: str
+    provider: Literal["groq", "openai"] = "groq"
+    model: str | None = None
+    api_key: str | None = None
 
 
 class AskResponse(BaseModel):

@@ -43,3 +43,10 @@ CREATE INDEX IF NOT EXISTS idx_chunks_document_id
     ON document_chunks(document_id);
 CREATE INDEX IF NOT EXISTS idx_messages_conversation_id
     ON messages(conversation_id);
+
+-- Lexical full-text search support (BM25-like ranking via ts_rank_cd)
+ALTER TABLE document_chunks
+    ADD COLUMN IF NOT EXISTS search_vector tsvector
+    GENERATED ALWAYS AS (to_tsvector('english', content)) STORED;
+CREATE INDEX IF NOT EXISTS idx_chunks_search_vector
+    ON document_chunks USING GIN (search_vector);

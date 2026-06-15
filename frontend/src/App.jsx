@@ -5,6 +5,7 @@ import Sidebar from './components/Sidebar';
 import UploadPage from './pages/UploadPage';
 import DocumentsPage from './pages/DocumentsPage';
 import ChatPage from './pages/ChatPage';
+import SettingsPage from './pages/SettingsPage';
 import { listConversations, deleteConversation } from './api';
 
 function ChatLayout() {
@@ -54,6 +55,7 @@ export default function App() {
             <Route index element={<ChatPage />} />
             <Route path=":conversation_id" element={<ChatPage />} />
           </Route>
+          <Route path="/settings" element={<SettingsPage />} />
         </Routes>
       </main>
     </div>
