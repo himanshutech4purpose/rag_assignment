@@ -15,13 +15,46 @@ const STORAGE_KEYS = {
   provider: 'llm_provider',
   model: 'llm_model',
   apiKey: 'llm_api_key',
+  systemPrompt: 'rag_system_prompt',
+  chunkSize: 'rag_chunk_size',
+  chunkOverlap: 'rag_chunk_overlap',
+  maxTokens: 'rag_max_tokens',
+  historyLimit: 'rag_history_limit',
 };
+
+export const DEFAULT_SYSTEM_PROMPT = `You are a helpful assistant. Use ONLY the following context to answer the question.
+Cite the source document name and chunk index for each fact you use.
+
+Context:
+{context}
+
+Previous conversation:
+{history}
+
+Question: {question}
+
+Answer:`;
+
+export const DEFAULT_CHUNK_SIZE = 1000;
+export const DEFAULT_CHUNK_OVERLAP = 200;
+export const DEFAULT_MAX_TOKENS = 4096;
+export const DEFAULT_HISTORY_LIMIT = 10;
+
+function parseIntOrDefault(value, defaultValue) {
+  const parsed = parseInt(value, 10);
+  return Number.isNaN(parsed) ? defaultValue : parsed;
+}
 
 export default function SettingsPage() {
   const [provider, setProvider] = useState('groq');
   const [model, setModel] = useState('');
   const [apiKey, setApiKey] = useState('');
   const [showKey, setShowKey] = useState(false);
+  const [systemPrompt, setSystemPrompt] = useState(DEFAULT_SYSTEM_PROMPT);
+  const [chunkSize, setChunkSize] = useState(DEFAULT_CHUNK_SIZE);
+  const [chunkOverlap, setChunkOverlap] = useState(DEFAULT_CHUNK_OVERLAP);
+  const [maxTokens, setMaxTokens] = useState(DEFAULT_MAX_TOKENS);
+  const [historyLimit, setHistoryLimit] = useState(DEFAULT_HISTORY_LIMIT);
   const [saved, setSaved] = useState(false);
 
   useEffect(() => {
@@ -33,6 +66,11 @@ export default function SettingsPage() {
     setProvider(storedProvider);
     setModel(PROVIDERS[storedProvider].models.includes(storedModel) ? storedModel : defaultModel);
     setApiKey(storedApiKey);
+    setSystemPrompt(localStorage.getItem(STORAGE_KEYS.systemPrompt) || DEFAULT_SYSTEM_PROMPT);
+    setChunkSize(parseIntOrDefault(localStorage.getItem(STORAGE_KEYS.chunkSize), DEFAULT_CHUNK_SIZE));
+    setChunkOverlap(parseIntOrDefault(localStorage.getItem(STORAGE_KEYS.chunkOverlap), DEFAULT_CHUNK_OVERLAP));
+    setMaxTokens(parseIntOrDefault(localStorage.getItem(STORAGE_KEYS.maxTokens), DEFAULT_MAX_TOKENS));
+    setHistoryLimit(parseIntOrDefault(localStorage.getItem(STORAGE_KEYS.historyLimit), DEFAULT_HISTORY_LIMIT));
   }, []);
 
   const handleProviderChange = (newProvider) => {
@@ -46,8 +84,22 @@ export default function SettingsPage() {
     localStorage.setItem(STORAGE_KEYS.provider, provider);
     localStorage.setItem(STORAGE_KEYS.model, model);
     localStorage.setItem(STORAGE_KEYS.apiKey, apiKey.trim());
+    localStorage.setItem(STORAGE_KEYS.systemPrompt, systemPrompt.trim());
+    localStorage.setItem(STORAGE_KEYS.chunkSize, String(chunkSize));
+    localStorage.setItem(STORAGE_KEYS.chunkOverlap, String(chunkOverlap));
+    localStorage.setItem(STORAGE_KEYS.maxTokens, String(maxTokens));
+    localStorage.setItem(STORAGE_KEYS.historyLimit, String(historyLimit));
     setSaved(true);
     setTimeout(() => setSaved(false), 3000);
+  };
+
+  const handleResetDefaults = () => {
+    setSystemPrompt(DEFAULT_SYSTEM_PROMPT);
+    setChunkSize(DEFAULT_CHUNK_SIZE);
+    setChunkOverlap(DEFAULT_CHUNK_OVERLAP);
+    setMaxTokens(DEFAULT_MAX_TOKENS);
+    setHistoryLimit(DEFAULT_HISTORY_LIMIT);
+    setSaved(false);
   };
 
   return (
@@ -133,6 +185,120 @@ export default function SettingsPage() {
           </select>
         </div>
 
+        <hr className="border-slate-200" />
+
+        {/* System Prompt */}
+        <div>
+          <label htmlFor="systemPrompt" className="block text-sm font-medium text-slate-700 mb-2">
+            System Prompt
+          </label>
+          <textarea
+            id="systemPrompt"
+            rows={8}
+            value={systemPrompt}
+            onChange={(e) => {
+              setSystemPrompt(e.target.value);
+              setSaved(false);
+            }}
+            className="w-full border border-slate-300 rounded-lg px-4 py-2.5 focus:outline-none focus:ring-2 focus:ring-indigo-500 font-mono text-sm"
+          />
+          <p className="mt-1.5 text-xs text-slate-500">
+            Default prompt sent to the LLM. Use {'{context}'}, {'{history}'}, and {'{question}'} placeholders.
+          </p>
+        </div>
+
+        {/* Max Tokens */}
+        <div>
+          <label htmlFor="maxTokens" className="block text-sm font-medium text-slate-700 mb-2">
+            Max Tokens
+          </label>
+          <input
+            id="maxTokens"
+            type="number"
+            min={1}
+            max={8192}
+            value={maxTokens}
+            onChange={(e) => {
+              setMaxTokens(parseIntOrDefault(e.target.value, DEFAULT_MAX_TOKENS));
+              setSaved(false);
+            }}
+            className="w-full border border-slate-300 rounded-lg px-4 py-2.5 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+          />
+          <p className="mt-1.5 text-xs text-slate-500">
+            Maximum number of tokens the LLM can generate per answer. Default is {DEFAULT_MAX_TOKENS}.
+          </p>
+        </div>
+
+        <hr className="border-slate-200" />
+
+        {/* Chat History Context Limit */}
+        <div>
+          <label htmlFor="historyLimit" className="block text-sm font-medium text-slate-700 mb-2">
+            Chat History Context
+          </label>
+          <input
+            id="historyLimit"
+            type="number"
+            min={1}
+            max={50}
+            value={historyLimit}
+            onChange={(e) => {
+              setHistoryLimit(parseIntOrDefault(e.target.value, DEFAULT_HISTORY_LIMIT));
+              setSaved(false);
+            }}
+            className="w-full border border-slate-300 rounded-lg px-4 py-2.5 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+          />
+          <p className="mt-1.5 text-xs text-slate-500">
+            Number of recent messages from the current conversation to include in the LLM context. Default is {DEFAULT_HISTORY_LIMIT}.
+          </p>
+        </div>
+
+        <hr className="border-slate-200" />
+
+        {/* Chunking */}
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+          <div>
+            <label htmlFor="chunkSize" className="block text-sm font-medium text-slate-700 mb-2">
+              Chunk Size
+            </label>
+            <input
+              id="chunkSize"
+              type="number"
+              min={100}
+              max={4000}
+              value={chunkSize}
+              onChange={(e) => {
+                setChunkSize(parseIntOrDefault(e.target.value, DEFAULT_CHUNK_SIZE));
+                setSaved(false);
+              }}
+              className="w-full border border-slate-300 rounded-lg px-4 py-2.5 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+            />
+            <p className="mt-1.5 text-xs text-slate-500">Default: {DEFAULT_CHUNK_SIZE}</p>
+          </div>
+
+          <div>
+            <label htmlFor="chunkOverlap" className="block text-sm font-medium text-slate-700 mb-2">
+              Chunk Overlap
+            </label>
+            <input
+              id="chunkOverlap"
+              type="number"
+              min={0}
+              max={1000}
+              value={chunkOverlap}
+              onChange={(e) => {
+                setChunkOverlap(parseIntOrDefault(e.target.value, DEFAULT_CHUNK_OVERLAP));
+                setSaved(false);
+              }}
+              className="w-full border border-slate-300 rounded-lg px-4 py-2.5 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+            />
+            <p className="mt-1.5 text-xs text-slate-500">Default: {DEFAULT_CHUNK_OVERLAP}</p>
+          </div>
+        </div>
+        <p className="text-xs text-slate-500">
+          Chunking settings are applied when new PDFs are uploaded. Existing chunks are not re-indexed.
+        </p>
+
         {/* Actions */}
         <div className="flex items-center gap-4 pt-2">
           <button
@@ -140,6 +306,13 @@ export default function SettingsPage() {
             className="px-6 py-2.5 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 font-medium transition"
           >
             Save Settings
+          </button>
+          <button
+            type="button"
+            onClick={handleResetDefaults}
+            className="px-6 py-2.5 bg-white text-slate-700 border border-slate-300 rounded-lg hover:bg-slate-50 font-medium transition"
+          >
+            Reset to Defaults
           </button>
           {saved && (
             <span className="text-sm text-green-600 font-medium">Saved successfully</span>

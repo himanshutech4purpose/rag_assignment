@@ -1,967 +1,497 @@
 # Low-Level Design (LLD): RAG Document Q&A App
 
 ## 1. Project Structure
+
 ```
 .
 ├── backend/
+│   ├── alembic/
+│   │   ├── env.py                        # Async Alembic runner
+│   │   ├── script.py.mako
+│   │   └── versions/
+│   │       └── 20260617_initial_schema.py  # Tables, indexes, extensions
 │   ├── app/
 │   │   ├── __init__.py
-│   │   ├── main.py              # FastAPI entrypoint + lifespan
-│   │   ├── config.py            # Pydantic settings / env vars
-│   │   ├── database.py          # asyncpg pool setup
+│   │   ├── main.py                       # App factory, lifespan, middleware
+│   │   ├── config.py                     # Pydantic Settings (env vars)
+│   │   ├── database.py                   # asyncpg pool + Alembic runner
+│   │   ├── dependencies.py               # FastAPI Depends providers
+│   │   ├── exceptions.py                 # Domain exceptions + global handlers
+│   │   ├── logging_config.py             # Structured logging setup
+│   │   ├── models/
+│   │   │   ├── __init__.py
+│   │   │   ├── domain.py                 # Internal dataclasses (Chunk, Message, …)
+│   │   │   └── schemas.py                # Pydantic request/response schemas
+│   │   ├── repositories/
+│   │   │   ├── __init__.py
+│   │   │   ├── chunk_repo.py             # document_chunks SQL + RRF fusion
+│   │   │   ├── conversation_repo.py      # conversations + messages SQL
+│   │   │   └── document_repo.py          # documents SQL
 │   │   ├── routers/
 │   │   │   ├── __init__.py
-│   │   │   ├── documents.py     # /api/upload, /api/documents
-│   │   │   └── conversations.py # /api/conversations/*
-│   │   ├── services/
-│   │   │   ├── __init__.py
-│   │   │   ├── pdf_parser.py    # Extract text from PDF
-│   │   │   ├── chunker.py       # Split text into chunks
-│   │   │   ├── embeddings.py    # HuggingFace embedding model
-│   │   │   ├── vector_store.py  # pgvector CRUD + search
-│   │   │   ├── storage.py       # MinIO client for PDF files
-│   │   │   └── llm.py           # Groq LLM client + prompt + streaming
-│   │   └── models/
+│   │   │   ├── health.py                 # GET /api/health
+│   │   │   ├── documents.py              # /api/upload, /api/documents/*
+│   │   │   └── conversations.py          # /api/conversations/*
+│   │   └── services/
 │   │       ├── __init__.py
-│   │       └── schemas.py       # Pydantic request/response models
-│   ├── init.sql                 # DB schema initialization
-│   ├── requirements.txt
+│   │       ├── ingestion.py              # Upload → parse → chunk → embed → store
+│   │       ├── retrieval.py              # Hybrid search + RRF + reranking
+│   │       ├── conversation_service.py   # Title gen, history, message persistence
+│   │       ├── embeddings.py             # SentenceTransformer wrapper (async)
+│   │       ├── reranker.py               # CrossEncoder wrapper (async)
+│   │       ├── llm.py                    # Groq / OpenAI via LangChain
+│   │       ├── storage.py                # MinIO wrapper (async)
+│   │       ├── chunker.py                # Character-based text splitter
+│   │       └── pdf_parser.py             # pypdf text + image extractor
+│   ├── alembic.ini
+│   ├── pyproject.toml
 │   └── Dockerfile
 ├── frontend/
-│   ├── public/
-│   ├── src/
-│   │   ├── App.jsx
-│   │   ├── pages/
-│   │   │   ├── UploadPage.jsx
-│   │   │   ├── DocumentsPage.jsx
-│   │   │   └── ChatPage.jsx
-│   │   ├── components/
-│   │   │   ├── Upload.jsx
-│   │   │   ├── Chat.jsx
-│   │   │   ├── Citation.jsx
-│   │   │   ├── Documents.jsx
-│   │   │   ├── Sidebar.jsx      # Conversation list + New Chat
-│   │   │   └── Navbar.jsx
-│   │   ├── api.js               # Axios + SSE fetch wrapper
-│   │   └── index.css
-│   ├── package.json
-│   └── Dockerfile
+│   └── src/
+│       ├── App.jsx
+│       ├── api.js                        # Axios + fetch/SSE helpers
+│       ├── components/
+│       │   ├── Chat.jsx                  # Streaming chat UI
+│       │   ├── Upload.jsx                # PDF upload + chunk preview
+│       │   ├── Citation.jsx              # Source citation card
+│       │   ├── Documents.jsx             # Document list with delete
+│       │   ├── Sidebar.jsx               # Conversation list + New Chat
+│       │   └── Navbar.jsx
+│       └── pages/
+│           ├── UploadPage.jsx
+│           ├── DocumentsPage.jsx
+│           ├── ChatPage.jsx
+│           └── SettingsPage.jsx          # LLM/chunking settings (localStorage)
 ├── docker-compose.yml
 ├── .env.example
-├── .gitignore
-├── plan.md
-├── hld.md
-├── lld.md
-└── user-flow.md
+└── README.md
 ```
 
 ## 2. Environment Variables
+
+See [.env.example](.env.example) for the full list with defaults. Required variables:
+
+| Variable | Required | Description |
+|---|---|---|
+| `GROQ_API_KEY` | Yes | Groq API key (or set `OPENAI_API_KEY` and switch provider) |
+| `DATABASE_URL` | Yes | asyncpg-compatible PostgreSQL URL |
+| `MINIO_ENDPOINT` | Yes | `host:port` of MinIO server |
+| `MINIO_ACCESS_KEY` | Yes | MinIO access key |
+| `MINIO_SECRET_KEY` | Yes | MinIO secret key |
+
+Key optional variables with their defaults:
+
 ```bash
-# .env.example
-GROQ_API_KEY=your_groq_api_key_here
-LLM_MODEL=llama3-8b-8192
-
-DATABASE_URL=postgresql://postgres:postgres@db:5432/ragdb
-
-MINIO_ENDPOINT=minio:9000
-MINIO_ACCESS_KEY=minioadmin
-MINIO_SECRET_KEY=minioadmin
-MINIO_BUCKET_NAME=documents
-MINIO_USE_SSL=false
-
+LLM_MODEL=llama-3.1-8b-instant
 EMBEDDING_MODEL=sentence-transformers/all-MiniLM-L6-v2
+RERANKER_MODEL=cross-encoder/ms-marco-MiniLM-L-6-v2
 CHUNK_SIZE=500
 CHUNK_OVERLAP=100
 TOP_K=5
+SEMANTIC_TOP_K=20
+LEXICAL_TOP_K=20
+RERANK_TOP_K=5
+RRF_K=60
+HISTORY_LIMIT=10
+MAX_UPLOAD_FILE_SIZE=10485760   # 10 MB
+MAX_UPLOAD_FILES=3
+CORS_ORIGINS=http://localhost:3000
 ```
 
 ## 3. Database Schema
 
-### 3.1 Extensions
-```sql
-CREATE EXTENSION IF NOT EXISTS vector;
-```
+Managed by Alembic; see `backend/alembic/versions/20260617_initial_schema.py`.
 
-### 3.2 Table: `documents`
-| Column | Type | Description |
-|--------|------|-------------|
-| `id` | `UUID PRIMARY KEY DEFAULT gen_random_uuid()` | Unique document ID |
-| `name` | `VARCHAR(255)` | Original PDF filename |
-| `size_bytes` | `INTEGER` | File size |
-| `minio_object` | `VARCHAR(255)` | Object name in MinIO bucket |
-| `status` | `VARCHAR(50)` | `uploaded` / `processing` / `indexed` / `error` |
-| `created_at` | `TIMESTAMP DEFAULT NOW()` | Upload time |
+### `documents`
+| Column | Type | Notes |
+|---|---|---|
+| `id` | `UUID PK DEFAULT gen_random_uuid()` | |
+| `name` | `VARCHAR(255) NOT NULL` | Original filename |
+| `size_bytes` | `INTEGER NOT NULL` | |
+| `minio_object` | `VARCHAR(255) NOT NULL` | `{uuid}_{filename}` |
+| `status` | `VARCHAR(50) NOT NULL DEFAULT 'uploaded'` | `processing` → `indexed` |
+| `created_at` | `TIMESTAMP DEFAULT NOW()` | |
 
-### 3.3 Table: `document_chunks`
-| Column | Type | Description |
-|--------|------|-------------|
-| `id` | `SERIAL PRIMARY KEY` | Unique chunk ID |
-| `document_id` | `UUID REFERENCES documents(id) ON DELETE CASCADE` | Parent document |
-| `document_name` | `VARCHAR(255)` | Denormalized filename for citations |
-| `page_number` | `INTEGER` | Page number in PDF (if available) |
-| `chunk_index` | `INTEGER` | Chunk sequence in document |
-| `content` | `TEXT` | Raw text chunk |
-| `embedding` | `vector(384)` | Embedding from all-MiniLM-L6-v2 |
-| `created_at` | `TIMESTAMP DEFAULT NOW()` | Ingestion time |
+### `document_chunks`
+| Column | Type | Notes |
+|---|---|---|
+| `id` | `SERIAL PK` | |
+| `document_id` | `UUID REFERENCES documents(id) ON DELETE CASCADE` | |
+| `document_name` | `VARCHAR(255) NOT NULL` | Denormalized for citations |
+| `page_number` | `INTEGER` | Nullable |
+| `chunk_index` | `INTEGER NOT NULL` | Global sequence across document |
+| `content` | `TEXT NOT NULL` | Raw chunk text |
+| `embedding` | `vector(384)` | all-MiniLM-L6-v2 output |
+| `search_vector` | `tsvector GENERATED ALWAYS AS (to_tsvector('english', content)) STORED` | For lexical search |
+| `created_at` | `TIMESTAMP DEFAULT NOW()` | |
 
-### 3.4 Indexes
-```sql
--- HNSW is preferred over IVFFlat: works with any row count, no training step required
-CREATE INDEX idx_chunks_embedding ON document_chunks USING hnsw (embedding vector_cosine_ops);
-CREATE INDEX idx_chunks_document_id ON document_chunks(document_id);
-```
+Indexes:
+- `HNSW` on `embedding vector_cosine_ops` — ANN cosine search
+- `GIN` on `search_vector` — full-text search
+- B-tree on `document_id` — cascade delete support
 
-### 3.5 Database Initialization (`backend/init.sql`)
+### `conversations`
+| Column | Type | Notes |
+|---|---|---|
+| `id` | `UUID PK DEFAULT gen_random_uuid()` | |
+| `title` | `VARCHAR(255)` | Auto-generated from first question |
+| `created_at` | `TIMESTAMP DEFAULT NOW()` | |
+| `updated_at` | `TIMESTAMP DEFAULT NOW()` | Bumped on each new message |
 
-The schema is created automatically on backend startup via the `lifespan` handler (see 5.2 `database.py`). The `init.sql` file uses `IF NOT EXISTS` / `IF NOT EXISTS` guards so it is safe to run on every startup.
+### `messages`
+| Column | Type | Notes |
+|---|---|---|
+| `id` | `SERIAL PK` | |
+| `conversation_id` | `UUID REFERENCES conversations(id) ON DELETE CASCADE` | |
+| `role` | `VARCHAR(20) NOT NULL` | `user` or `assistant` |
+| `content` | `TEXT NOT NULL` | |
+| `sources` | `JSONB` | Null for user messages |
+| `created_at` | `TIMESTAMP DEFAULT NOW()` | |
 
-```sql
-CREATE EXTENSION IF NOT EXISTS vector;
-CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
-
-CREATE TABLE IF NOT EXISTS documents (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    name VARCHAR(255) NOT NULL,
-    size_bytes INTEGER NOT NULL,
-    minio_object VARCHAR(255) NOT NULL,
-    status VARCHAR(50) NOT NULL DEFAULT 'uploaded',
-    created_at TIMESTAMP DEFAULT NOW()
-);
-
-CREATE TABLE IF NOT EXISTS document_chunks (
-    id SERIAL PRIMARY KEY,
-    document_id UUID REFERENCES documents(id) ON DELETE CASCADE,
-    document_name VARCHAR(255) NOT NULL,
-    page_number INTEGER,
-    chunk_index INTEGER NOT NULL,
-    content TEXT NOT NULL,
-    embedding vector(384),
-    created_at TIMESTAMP DEFAULT NOW()
-);
-
-CREATE TABLE IF NOT EXISTS conversations (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    title VARCHAR(255),
-    created_at TIMESTAMP DEFAULT NOW(),
-    updated_at TIMESTAMP DEFAULT NOW()
-);
-
-CREATE TABLE IF NOT EXISTS messages (
-    id SERIAL PRIMARY KEY,
-    conversation_id UUID REFERENCES conversations(id) ON DELETE CASCADE,
-    role VARCHAR(20) NOT NULL,
-    content TEXT NOT NULL,
-    sources JSONB,
-    created_at TIMESTAMP DEFAULT NOW()
-);
-
-CREATE INDEX IF NOT EXISTS idx_chunks_embedding
-    ON document_chunks USING hnsw (embedding vector_cosine_ops);
-CREATE INDEX IF NOT EXISTS idx_chunks_document_id
-    ON document_chunks(document_id);
-CREATE INDEX IF NOT EXISTS idx_messages_conversation_id
-    ON messages(conversation_id);
-```
+Index: B-tree on `conversation_id`.
 
 ## 4. API Specification
 
-### 4.1 Health Check
+### Health
 ```
 GET /api/health
-Response: { "status": "ok" }
+→ 200: { "status": "ok" }
 ```
 
-### 4.2 Upload Documents
+### Documents
 ```
-POST /api/upload
+POST /api/upload?chunk_size=500&chunk_overlap=100
 Content-Type: multipart/form-data
-Body: files[] (max 3 PDFs)
+Body: files[] (max 3 PDFs, each ≤ 10MB)
+→ 200: { "documents": [{ "id", "name", "status", "chunks_inserted", "images_ignored" }] }
+→ 400: { "error": "ValidationError", "detail": "..." }
 
-Response 200:
-{
-  "documents": [
-    {
-      "id": "uuid-1",
-      "name": "report.pdf",
-      "status": "indexed",
-      "chunks_inserted": 28
-    },
-    {
-      "id": "uuid-2",
-      "name": "summary.pdf",
-      "status": "indexed",
-      "chunks_inserted": 14
-    }
-  ]
-}
-```
-
-### 4.3 List Documents
-```
 GET /api/documents
+→ 200: { "documents": [{ "id", "name", "size_bytes", "status", "created_at" }] }
 
-Response 200:
-{
-  "documents": [
-    {
-      "id": "uuid-1",
-      "name": "report.pdf",
-      "size_bytes": 102400,
-      "status": "indexed",
-      "created_at": "2026-06-14T10:00:00Z"
-    }
-  ]
-}
+GET /api/documents/{id}/chunks
+→ 200: [{ "id", "document_name", "page_number", "chunk_index", "content" }]
+→ 400: invalid UUID format
+
+DELETE /api/documents/{id}
+→ 200: { "message": "Document deleted successfully" }
+→ 404: { "error": "NotFoundError", "detail": "..." }
 ```
 
-### 4.4 Delete Document
-```
-DELETE /api/documents/{document_id}
-
-Response 200:
-{
-  "message": "Document deleted successfully"
-}
-```
-
-### 4.5 Create Conversation
+### Conversations
 ```
 POST /api/conversations
-Content-Type: application/json
-Body (optional):
-{
-  "title": "Revenue questions"
-}
+Body: { "title": "optional" }
+→ 201: { "id", "title", "created_at", "updated_at" }
 
-Response 201:
-{
-  "id": "conv-uuid-1",
-  "title": "Revenue questions",
-  "created_at": "2026-06-14T10:00:00Z",
-  "updated_at": "2026-06-14T10:00:00Z"
-}
-```
-
-### 4.6 List Conversations
-```
 GET /api/conversations
+→ 200: { "conversations": [...] }  # ordered by updated_at DESC
 
-Response 200:
-{
-  "conversations": [
-    {
-      "id": "conv-uuid-1",
-      "title": "Revenue questions",
-      "created_at": "2026-06-14T10:00:00Z",
-      "updated_at": "2026-06-14T10:30:00Z"
-    }
-  ]
+GET /api/conversations/{id}
+→ 200: { "id", "title", "created_at", "updated_at", "messages": [...] }
+→ 404: { "error": "NotFoundError", "detail": "..." }
+
+DELETE /api/conversations/{id}
+→ 200: { "message": "Conversation deleted successfully" }
+→ 404: not found
+
+POST /api/conversations/{id}/ask
+Body: {
+  "question": "string",
+  "provider": "groq" | "openai",   # default: "groq"
+  "model": "string | null",         # default: env LLM_MODEL
+  "api_key": "string | null",       # default: env key
+  "system_prompt": "string | null",
+  "max_tokens": 1..8192 | null,
+  "history_limit": 1..50 | null
 }
-```
+→ 200: { "answer": "string", "sources": [{ "document_name", "page_number", "chunk_index", "content", "score" }] }
+→ 400: no documents uploaded / empty question
+→ 503: LLM unavailable
 
-### 4.7 Get Conversation with Messages
-```
-GET /api/conversations/{conversation_id}
+POST /api/conversations/{id}/ask/stream
+Body: same as /ask
+→ 200: text/event-stream
 
-Response 200:
-{
-  "id": "conv-uuid-1",
-  "title": "Revenue questions",
-  "created_at": "2026-06-14T10:00:00Z",
-  "messages": [
-    {
-      "id": 1,
-      "role": "user",
-      "content": "What was the revenue in 2023?",
-      "sources": null,
-      "created_at": "2026-06-14T10:05:00Z"
-    },
-    {
-      "id": 2,
-      "role": "assistant",
-      "content": "The revenue in 2023 was $12.4 million...",
-      "sources": [
-        {
-          "document_name": "annual_report.pdf",
-          "page_number": 3,
-          "chunk_index": 2,
-          "content": "...",
-          "score": 0.94
-        }
-      ],
-      "created_at": "2026-06-14T10:05:02Z"
-    }
-  ]
-}
-
-Response 404:
-{
-  "error": "Conversation not found"
-}
-```
-
-### 4.8 Delete Conversation
-```
-DELETE /api/conversations/{conversation_id}
-
-Response 200:
-{
-  "message": "Conversation deleted successfully"
-}
-
-Response 404:
-{
-  "error": "Conversation not found"
-}
-```
-
-### 4.9 Ask Question (within Conversation)
-```
-POST /api/conversations/{conversation_id}/ask
-Content-Type: application/json
-Body:
-{
-  "question": "What is the main conclusion?"
-}
-
-Response 200:
-{
-  "answer": "The main conclusion is... [report.pdf, chunk 3]",
-  "sources": [
-    {
-      "document_name": "report.pdf",
-      "page_number": 2,
-      "chunk_index": 3,
-      "content": "...",
-      "score": 0.92
-    }
-  ]
-}
-
-Response 400:
-{
-  "error": "Question cannot be empty"
-}
-
-Response 404:
-{
-  "error": "Conversation not found"
-}
-```
-
-### 4.10 Ask Question with SSE Streaming
-```
-POST /api/conversations/{conversation_id}/ask/stream
-Content-Type: application/json
-Body:
-{
-  "question": "What is the main conclusion?"
-}
-
-Response: text/event-stream
-
-Stream events:
-  data: The           # token
-  data: main          # token
-  data: conclusion    # token
-  ...
+SSE event format:
+  data: <token>\n\n          # one per LLM token
   event: sources
-  data: [{"document_name": "report.pdf", "page_number": 2, ...}]
-  data: [DONE]
+  data: [{...}]\n\n          # after all tokens
+  data: [DONE]\n\n           # end of stream
 
-Error event (if LLM fails mid-stream):
   event: error
-  data: {"error": "LLM service unavailable"}
+  data: {"error": "..."}\n\n # on LLM failure
 ```
 
-## 5. Backend Modules
+## 5. Service Layer
 
-### 5.1 `config.py`
-```python
-from pydantic_settings import BaseSettings
+### `IngestionService` (`services/ingestion.py`)
+```
+ingest(filename, content, chunk_size?, chunk_overlap?):
+  1. Generate UUID document_id
+  2. Upload to MinIO: object_name = f"{document_id}_{filename}"
+  3. DB transaction:
+     a. INSERT documents (status="processing")
+     b. extract_text(content) → pages, images_ignored   [asyncio.to_thread]
+     c. split_text(page.text) → chunks                  [sync]
+     d. embeddings.embed([c.content for c in chunks])   [asyncio.to_thread]
+     e. chunk_repo.insert_many(conn, chunks)
+     f. UPDATE documents SET status="indexed"
+  4. Return DocumentUploadResult
 
-class Settings(BaseSettings):
-    groq_api_key: str
-    database_url: str
-    minio_endpoint: str
-    minio_access_key: str
-    minio_secret_key: str
-    minio_bucket_name: str = "documents"
-    minio_use_ssl: bool = False
-    embedding_model: str = "sentence-transformers/all-MiniLM-L6-v2"
-    llm_model: str = "llama3-8b-8192"
-    chunk_size: int = 500
-    chunk_overlap: int = 100
-    top_k: int = 5
+On exception:
+  - Transaction rolls back (atomically undoes a–f)
+  - MinIO object deleted (cleanup; cleanup errors are logged, not re-raised)
+  - Original exception re-raised
 
-settings = Settings()
+delete_document(conn, document_id):
+  1. Get minio_object name from DB
+  2. DELETE document row (cascade deletes chunks)
+  3. Delete MinIO object
+  (DB delete happens before storage delete: failed DB → no orphan record)
 ```
 
-### 5.2 `database.py`
+### `RetrievalService` (`services/retrieval.py`)
+```
+search(conn, query_text, top_k?):
+  1. embed([query_text])[0]                              → query_embedding
+  2. chunk_repo.semantic_search(conn, embedding, 20)    → semantic_chunks
+  3. chunk_repo.lexical_search(conn, query_text, 20)    → lexical_chunks
+  4. chunk_repo.fuse_rrf(semantic, lexical)             → fused (sorted by RRF score)
+  5. reranker.rerank(query_text, fused[:40], top_k)    → reranked
 
-> **Why asyncpg?** FastAPI is async-native. Using synchronous `psycopg2` would block
-> the event loop during DB calls, breaking SSE streaming. `asyncpg` provides true
-> async Postgres access that works naturally with `async def` endpoints.
-
-```python
-import asyncpg
-from app.config import settings
-
-pool: asyncpg.Pool | None = None
-
-async def init_db():
-    global pool
-    pool = await asyncpg.create_pool(settings.database_url)
-    async with pool.acquire() as conn:
-        with open("init.sql") as f:
-            await conn.execute(f.read())
-
-async def close_db():
-    global pool
-    if pool:
-        await pool.close()
-
-def get_pool() -> asyncpg.Pool:
-    return pool
+RRF formula: score += 1 / (k + rank) for each list
 ```
 
-### 5.3 `storage.py`
-```python
-from minio import Minio
-from app.config import settings
+### `ConversationService` (`services/conversation_service.py`)
+```
+add_user_message(conn, conversation_id, question, history_limit?):
+  1. Validate question is non-empty
+  2. Check conversation exists (raises NotFoundError if not)
+  3. INSERT user message
+  4. maybe_update_title: if title == "New conversation", generate from question
+  5. Fetch last N messages (history_limit or settings.history_limit)
+  6. Return history list
 
-client = Minio(
-    settings.minio_endpoint,
-    access_key=settings.minio_access_key,
-    secret_key=settings.minio_secret_key,
-    secure=settings.minio_use_ssl
-)
-
-def ensure_bucket():
-    if not client.bucket_exists(settings.minio_bucket_name):
-        client.make_bucket(settings.minio_bucket_name)
-
-def upload_file(object_name: str, data: bytes, length: int):
-    from io import BytesIO
-    client.put_object(settings.minio_bucket_name, object_name, BytesIO(data), length)
-
-def delete_file(object_name: str):
-    client.remove_object(settings.minio_bucket_name, object_name)
+generate_title(question):
+  - First 6 words, max 40 chars, appends "..." if truncated
 ```
 
-### 5.4 `pdf_parser.py`
+### `LLMService` (`services/llm.py`)
 ```python
-import io
-from pypdf import PdfReader
-
-def extract_text(file_bytes: bytes) -> list[dict]:
-    reader = PdfReader(io.BytesIO(file_bytes))
-    pages = []
-    for i, page in enumerate(reader.pages, start=1):
-        text = page.extract_text()
-        pages.append({"page_number": i, "text": text})
-    return pages
-```
-
-### 5.5 `chunker.py`
-```python
-def split_text(text: str, chunk_size: int, chunk_overlap: int) -> list[str]:
-    chunks = []
-    start = 0
-    while start < len(text):
-        end = min(start + chunk_size, len(text))
-        chunks.append(text[start:end])
-        start += chunk_size - chunk_overlap
-    return chunks
-```
-
-### 5.6 `embeddings.py`
-```python
-from sentence_transformers import SentenceTransformer
-
-_model = None
-
-def get_model():
-    global _model
-    if _model is None:
-        _model = SentenceTransformer(settings.embedding_model)
-    return _model
-
-def embed(texts: list[str]) -> list[list[float]]:
-    return get_model().encode(texts).tolist()
-```
-
-### 5.7 `vector_store.py`
-```python
-import asyncpg
-
-async def insert_chunks(pool: asyncpg.Pool, chunks: list[dict]):
-    sql = """
-        INSERT INTO document_chunks
-            (document_id, document_name, page_number, chunk_index, content, embedding)
-        VALUES ($1, $2, $3, $4, $5, $6)
-    """
-    async with pool.acquire() as conn:
-        await conn.executemany(sql, [
-            (c["document_id"], c["document_name"], c["page_number"],
-             c["chunk_index"], c["content"], c["embedding"])
-            for c in chunks
-        ])
-
-async def search_chunks(pool: asyncpg.Pool, query_embedding: list[float], top_k: int):
-    sql = """
-        SELECT document_name, page_number, chunk_index, content,
-               1 - (embedding <=> $1::vector) AS score
-        FROM document_chunks
-        ORDER BY embedding <=> $1::vector
-        LIMIT $2
-    """
-    async with pool.acquire() as conn:
-        return await conn.fetch(sql, query_embedding, top_k)
-```
-
-### 5.8 `llm.py`
-```python
-from langchain_groq import ChatGroq
-from langchain.prompts import PromptTemplate
-
-prompt = PromptTemplate.from_template("""
-You are a helpful assistant. Use ONLY the following context to answer the question.
-Cite the source document name and chunk index for each fact you use.
+# Prompt template (default):
+"""You are a helpful assistant. Use ONLY the following context...
 
 Context:
-{context}
+{context}          # formatted chunks: [doc - page N, chunk M]\n{content}
+
+Previous conversation:
+{history}          # "User: ...\n\nAssistant: ..."
 
 Question: {question}
 
-Answer:
-""")
+Answer:"""
 
-llm = ChatGroq(
-    api_key=settings.groq_api_key,
-    model_name=settings.llm_model,
-    temperature=0.1
-)
+answer(question, chunks, history, provider, model, api_key, system_prompt, max_tokens):
+  chain = build_prompt(system_prompt) | _get_llm(provider, model, api_key, max_tokens)
+  return await asyncio.to_thread(chain.invoke, {...})
 
-def answer_question(question: str, chunks: list[dict]) -> str:
-    context = "\n\n".join(
-        f"[{c['document_name']} - chunk {c['chunk_index']}]\n{c['content']}" for c in chunks
-    )
-    chain = prompt | llm
-    return chain.invoke({"context": context, "question": question}).content
+stream_answer(...) → AsyncIterator[str]:
+  async for chunk in chain.astream({...}):
+      yield str(chunk.content)
 ```
 
-### 5.9 `main.py`
+### `EmbeddingService` (`services/embeddings.py`)
+- Lazy-loads `SentenceTransformer` model on first use
+- Uses `asyncio.to_thread` so CPU-bound encoding doesn't block the event loop
+- Returns `list[list[float]]` (dim=384)
+
+### `RerankerService` (`services/reranker.py`)
+- Lazy-loads `CrossEncoder` model
+- `rerank(query, chunks, top_k)` → runs `asyncio.to_thread`, returns top-K by cross-encoder score
+
+### `StorageService` (`services/storage.py`)
+- Wraps `Minio` client with `asyncio.to_thread` for all operations
+- `ensure_bucket()`: idempotent bucket creation at startup
+- Raises `StorageError` (→ HTTP 500) on any failure
+
+## 6. Repository Layer
+
+### `chunk_repo.py`
 ```python
-from contextlib import asynccontextmanager
-from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
-from app.database import init_db, close_db
-from app.routers import documents, conversations
-from app.services.storage import ensure_bucket
+# Semantic search (pgvector cosine ANN via HNSW)
+SELECT id, document_name, page_number, chunk_index, content,
+       1 - (embedding <=> $1::vector) AS score
+FROM document_chunks
+ORDER BY embedding <=> $1::vector
+LIMIT $2
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    await init_db()
-    ensure_bucket()
-    yield
-    await close_db()
+# Lexical search (PostgreSQL full-text)
+SELECT id, ..., ts_rank_cd(search_vector, plainto_tsquery('english', $1), 32) AS score
+FROM document_chunks
+WHERE search_vector @@ plainto_tsquery('english', $1)
+ORDER BY score DESC
+LIMIT $2
 
-app = FastAPI(title="RAG Document Q&A", lifespan=lifespan)
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["http://localhost:3000"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-app.include_router(documents.router, prefix="/api")
-app.include_router(conversations.router, prefix="/api")
+# RRF fusion (pure Python, no DB round-trip)
+def fuse_rrf(semantic, lexical) -> list[RetrievedChunk]:
+    k = settings.rrf_k
+    for rank, chunk in enumerate(semantic, 1): fused[chunk.id].score += 1/(k+rank)
+    for rank, chunk in enumerate(lexical, 1):  fused[chunk.id].score += 1/(k+rank)
+    return sorted(fused.values(), key=lambda x: x.score, reverse=True)
 ```
 
-## 6. Frontend Modules
+### `conversation_repo.py`
+- `recent_messages(conn, conversation_id, limit)`: fetches last N messages by `id DESC`, reverses order for chronological history
+- `add_message(conn, ..., sources)`: serializes `sources` as JSON string for `JSONB` column
+- `touch(conn, conversation_id)`: `UPDATE SET updated_at = NOW()`
 
-### 6.1 Page Structure
-| Route | Page | Purpose |
-|-------|------|---------|
-| `/` | Upload Page | Upload 1–3 PDF documents |
-| `/documents` | Documents Page | View all uploaded documents and delete any |
-| `/chat` | Chat Page | Ask questions and view cited answers |
+### `document_repo.py`
+- `get_object_name(conn, document_id)`: single-column fetch for MinIO cleanup
+- `delete(conn, document_id)`: checks `DELETE N` rows; raises `NotFoundError` if 0
 
-### 6.2 `api.js`
-```javascript
-import axios from 'axios';
+## 7. Dependency Injection
 
-const API_BASE = 'http://localhost:8000/api';
-const api = axios.create({ baseURL: API_BASE });
+All singleton services are stored in `app.state` at startup (in `main.py` lifespan) and retrieved by FastAPI `Depends` functions in `dependencies.py`:
 
-export const uploadFiles = (files) => {
-  const formData = new FormData();
-  files.forEach((f) => formData.append('files', f));
-  return api.post('/upload', formData);
-};
+```python
+# All services read from app.state — one instance per process lifetime
+def get_ingestion_service(request: Request) -> IngestionService:
+    return request.app.state.ingestion_service
 
-export const listDocuments = () => api.get('/documents');
-export const deleteDocument = (id) => api.delete(`/documents/${id}`);
-
-export const createConversation = (title) => api.post('/conversations', { title });
-export const listConversations = () => api.get('/conversations');
-export const getConversation = (id) => api.get(`/conversations/${id}`);
-export const deleteConversation = (id) => api.delete(`/conversations/${id}`);
-
-export async function streamQuestion(conversationId, question, { onToken, onSources, onDone, onError }) {
-  const response = await fetch(`${API_BASE}/conversations/${conversationId}/ask/stream`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ question }),
-  });
-  if (!response.ok) {
-    onError(new Error(`HTTP ${response.status}`));
-    return;
-  }
-  const reader = response.body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = '';
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-    const lines = buffer.split('\n');
-    buffer = lines.pop();
-    for (const line of lines) {
-      if (line.startsWith('data: [DONE]')) { onDone(); return; }
-      if (line.startsWith('event: sources')) continue;
-      if (line.startsWith('data: ')) {
-        const payload = line.slice(6);
-        if (payload.startsWith('[')) onSources(JSON.parse(payload));
-        else onToken(payload);
-      }
-    }
-  }
-}
+# DB connection: new connection acquired per request, released after response
+async def get_db_connection() -> asyncpg.Connection:
+    async with get_pool().acquire() as conn:
+        yield conn
 ```
 
-### 6.3 `Upload.jsx`
-- File input accepting `.pdf`
-- Limit to 3 files
-- Show upload progress / success / error
-- Call `uploadFiles`
-
-### 6.4 `Chat.jsx`
-- Input field for question
-- Display loading spinner while waiting
-- Render answer and list of sources
-- Source item shows: document name, page, chunk index, relevance score
-
-### 6.5 `Citation.jsx`
-- Small card component for each source
-- Displays truncated content with metadata
-
-### 6.6 `Documents.jsx`
-- Table or card grid listing uploaded documents
-- Columns: name, size, status, upload date
-- **Delete** button per row with confirmation dialog
-- Navigation link to `/chat`
-
-### 6.7 `Sidebar.jsx`
-- List of past conversations (title, last updated)
-- **New Chat** button to create a fresh conversation
-- Click to navigate to `/chat/{conversation_id}`
-- **Delete** button per conversation with confirmation
-- Active conversation highlighted
-
-## 7. Docker Compose
-```yaml
-services:
-  db:
-    image: pgvector/pgvector:pg16
-    environment:
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
-      POSTGRES_DB: ragdb
-    volumes:
-      - pgdata:/var/lib/postgresql/data
-    ports:
-      - "5432:5432"
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres"]
-      interval: 5s
-      timeout: 5s
-      retries: 5
-
-  minio:
-    image: minio/minio:latest
-    command: server /data --console-address ":9001"
-    environment:
-      MINIO_ROOT_USER: minioadmin
-      MINIO_ROOT_PASSWORD: minioadmin
-    volumes:
-      - miniodata:/data
-    ports:
-      - "9000:9000"
-      - "9001:9001"
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
-      interval: 5s
-      timeout: 5s
-      retries: 5
-
-  backend:
-    build: ./backend
-    env_file: .env
-    ports:
-      - "8000:8000"
-    depends_on:
-      db:
-        condition: service_healthy
-      minio:
-        condition: service_healthy
-    volumes:
-      - ./backend:/app
-      - model_cache:/root/.cache
-
-  frontend:
-    build: ./frontend
-    ports:
-      - "3000:3000"
-    depends_on:
-      - backend
-    volumes:
-      - ./frontend:/app
-      - /app/node_modules
-
-volumes:
-  pgdata:
-  miniodata:
-  model_cache:
+Type aliases for router signatures:
+```python
+DBConnection = Annotated[asyncpg.Connection, Depends(get_db_connection)]
+IngestionDep  = Annotated[IngestionService,  Depends(get_ingestion_service)]
+# etc.
 ```
 
 ## 8. Error Handling
 
-### 8.1 Standard Error Response
-All error responses use a consistent shape:
-
-```python
-class ErrorResponse(BaseModel):
-    error: str
-    detail: str | None = None
+### Exception Hierarchy
+```
+RAGException (base, maps to HTTP error)
+  ├── NotFoundError     → 404
+  ├── ValidationError   → 400
+  ├── LLMServiceError   → 503
+  └── StorageError      → 500
 ```
 
-Example: `{"error": "Document not found", "detail": "No document with id abc-123"}`
+All `RAGException` subclasses are caught by a global handler in `exceptions.py` and returned as:
+```json
+{ "error": "NotFoundError", "detail": "Document not found: abc-123" }
+```
 
-### 8.2 Error Scenarios
+Unhandled `Exception` → 500 `InternalServerError`.
 
-| Scenario | Status | `error` field |
-|----------|--------|---------------|
-| More than 3 files | `400` | `"Maximum 3 PDF files allowed"` |
-| Non-PDF file | `400` | `"Only PDF files are supported"` |
-| Empty question | `400` | `"Question cannot be empty"` |
-| File too large (>10MB) | `400` | `"File exceeds 10MB limit"` |
-| Document not found | `404` | `"Document not found"` |
-| Conversation not found | `404` | `"Conversation not found"` |
-| No documents indexed | `400` | `"Upload documents before asking questions"` |
-| LLM API failure | `503` | `"LLM service temporarily unavailable"` |
-| DB connection failure | `500` | `"Internal server error"` |
-| MinIO failure | `500` | `"Internal server error"` |
+### HTTP Middleware
+`add_request_id_and_logging` in `main.py`:
+- Injects `X-Request-ID` UUID header on every response
+- Logs method, path, status code, and duration
+- Catches middleware-level exceptions (route exceptions are handled before reaching middleware)
 
-### 8.3 SSE Error Events
-If an error occurs mid-stream during SSE, emit an error event before closing:
+### SSE Error Events
+If the LLM stream fails:
 ```
 event: error
 data: {"error": "LLM service temporarily unavailable"}
 ```
+Unexpected exceptions in the generator also emit an error event and log the traceback.
 
-## 9. Coding Style
+## 9. SSE Streaming Protocol
 
-### 9.1 No Defensive Coding
-This project intentionally avoids over-defensive patterns. Keep the code lean:
-
-- **Do NOT** wrap every function in `try/except`. Let exceptions propagate naturally.
-- **Do NOT** add redundant null checks for values that are guaranteed by the schema or DB constraints.
-- **Do NOT** add `if x is not None` guards when `x` is a required field.
-- **Do NOT** add comments explaining obvious code. Only comment non-obvious *why*, never *what*.
-- **DO** use FastAPI's built-in exception handlers -- they automatically return proper HTTP error responses for `HTTPException`, validation errors, and unhandled exceptions.
-- **DO** use Pydantic models for validation -- they reject bad input before your code runs.
-- **DO** catch errors only where you can meaningfully recover or need to provide a user-friendly message (e.g., catching Groq API errors to return a 503).
-- **DO** use `HTTPException` from FastAPI to return error responses with proper status codes.
-
-### 9.2 General Style
-- Type hints on all function signatures.
-- Async functions for all I/O (DB, MinIO, LLM API).
-- Small, focused functions -- each does one thing.
-- No global mutable state except the DB pool and embedding model singleton.
-- Configuration via Pydantic `BaseSettings` (validated at startup, fails fast on missing env vars).
-
-## 10. Real-Time Communication: WebSocket vs SSE
-
-### 10.1 Decision Matrix
-| Factor | SSE | WebSocket |
-|--------|-----|-----------|
-| Direction | Server → Client only | Bidirectional |
-| Use case | Streaming LLM tokens to UI | Full-duplex chat + streaming |
-| Complexity | Low (HTTP-based) | Medium (persistent connection) |
-| Reconnect | Built-in browser support | Must implement manually |
-| Scalability | Easier with load balancers | Harder with load balancers |
-| Multi-turn | Still needs REST for sending | Native bidirectional support |
-
-### 10.2 Recommended Approach
-**Use SSE for this scope.**
-- The primary real-time need is streaming the LLM answer token-by-token.
-- Questions are sent via `POST /api/ask` (REST).
-- Server responds with `text/event-stream` and streams tokens as they are generated.
-- UI renders tokens incrementally in the chat window.
-
-**WebSocket is overkill here** because:
-- We don't need continuous bidirectional state (e.g., live collaboration).
-- SSE is simpler to implement, debug, and scale.
-- If multi-tenancy or real-time typing indicators are added later, WebSocket becomes justified.
-
-### 10.3 SSE Implementation
+### Server-side (backend)
 ```python
-from fastapi.responses import StreamingResponse
-
-@router.post("/conversations/{conversation_id}/ask/stream")
-async def ask_stream(conversation_id: str, request: AskRequest):
-    async def event_generator():
-        history = get_conversation_history(conversation_id, limit=5)
-        chunks = retrieve_chunks(request.question)
-        async for token in llm.astream_answer(request.question, chunks, history):
+async def event_generator():
+    answer_parts = []
+    try:
+        async for token in llm_service.stream_answer(...):
+            answer_parts.append(token)
             yield f"data: {token}\n\n"
-        sources = json.dumps(format_sources(chunks))
-        yield f"event: sources\ndata: {sources}\n\n"
-        yield "data: [DONE]\n\n"
 
-    return StreamingResponse(
-        event_generator(),
-        media_type="text/event-stream",
-        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
-    )
+        answer = "".join(answer_parts)
+        async with conn.transaction():
+            await conversation_repo.add_message(conn, conversation_id, "assistant", answer, sources)
+            await conversation_repo.touch(conn, conversation_id)
+
+        yield f"event: sources\ndata: {json.dumps(sources)}\n\n"
+        yield "data: [DONE]\n\n"
+    except LLMServiceError:
+        yield 'event: error\ndata: {"error": "LLM service temporarily unavailable"}\n\n'
+    except Exception:
+        logger.exception(...)
+        yield 'event: error\ndata: {"error": "An unexpected error occurred"}\n\n'
 ```
 
-### 10.4 Frontend SSE Consumption
-
-> **Note:** `EventSource` only supports GET requests. Since the ask endpoint uses POST
-> (to send JSON body), we use `fetch()` with `ReadableStream` instead.
-
+### Client-side parsing (frontend `api.js`)
+Tracks `currentEvent` type from `event:` lines; resets on blank lines:
 ```javascript
-async function streamAnswer(conversationId, question, onToken, onSources, onDone, onError) {
-  const response = await fetch(`/api/conversations/${conversationId}/ask/stream`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ question }),
-  });
-
-  if (!response.ok) {
-    onError(new Error(`HTTP ${response.status}`));
-    return;
-  }
-
-  const reader = response.body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = '';
-
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-
-    buffer += decoder.decode(value, { stream: true });
-    const lines = buffer.split('\n');
-    buffer = lines.pop();
-
-    for (const line of lines) {
-      if (line.startsWith('data: [DONE]')) {
-        onDone();
-        return;
-      } else if (line.startsWith('event: sources')) {
-        continue;
-      } else if (line.startsWith('data: ')) {
+let currentEvent = null;
+for (const line of lines) {
+    if (line === '')                { currentEvent = null; continue; }
+    if (line.startsWith('event: ')) { currentEvent = line.slice(7).trim(); continue; }
+    if (line.startsWith('data: ')) {
         const payload = line.slice(6);
-        if (payload.startsWith('{') || payload.startsWith('[')) {
-          onSources(JSON.parse(payload));
-        } else {
-          onToken(payload);
-        }
-      }
+        if (payload === '[DONE]')        { onDone(); return; }
+        if (currentEvent === 'sources')  { onSources(JSON.parse(payload)); }
+        else if (currentEvent === 'error') { onError(...); return; }
+        else                             { onToken(payload); }
     }
-  }
 }
 ```
 
-## 11. Multi-Turn Conversation Handling
+This correctly handles LLM tokens that start with `[` (citations, markdown, etc.) without misrouting them to `onSources`.
 
-### 11.1 Data Model
+## 10. Chunking
 
-#### Table: `conversations`
-| Column | Type | Description |
-|--------|------|-------------|
-| `id` | `UUID PRIMARY KEY DEFAULT gen_random_uuid()` | Conversation ID |
-| `title` | `VARCHAR(255)` | Auto-generated title (first question summary) |
-| `created_at` | `TIMESTAMP DEFAULT NOW()` | Start time |
-| `updated_at` | `TIMESTAMP DEFAULT NOW()` | Last message time |
+`chunker.split_text(text, chunk_size, chunk_overlap)`:
+- Character-based sliding window (not token-based)
+- Step = `chunk_size - chunk_overlap`
+- Validation: `chunk_size > 0`, `0 ≤ chunk_overlap < chunk_size`
+- Default: size=500, overlap=100 → step=400 chars
 
-#### Table: `messages`
-| Column | Type | Description |
-|--------|------|-------------|
-| `id` | `SERIAL PRIMARY KEY` | Message ID |
-| `conversation_id` | `UUID REFERENCES conversations(id) ON DELETE CASCADE` | Parent conversation |
-| `role` | `VARCHAR(20)` | `user` or `assistant` |
-| `content` | `TEXT` | Message text |
-| `sources` | `JSONB` | Citation metadata (assistant only) |
-| `created_at` | `TIMESTAMP DEFAULT NOW()` | Message time |
+Per-page chunking: each PDF page is chunked independently; `chunk_index` is global across the whole document.
 
-### 11.2 API Endpoints for Conversations
+## 11. Migration Management
 
-See sections 4.5–4.10 for full request/response schemas.
+Alembic is configured in `alembic.ini` with an async-capable `env.py`. At app startup, `database.py` runs:
 
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| `POST` | `/api/conversations` | Create new conversation |
-| `GET` | `/api/conversations` | List all conversations |
-| `GET` | `/api/conversations/{id}` | Get conversation with all messages |
-| `DELETE` | `/api/conversations/{id}` | Delete conversation and its messages |
-| `POST` | `/api/conversations/{id}/ask` | Ask question (non-streaming) |
-| `POST` | `/api/conversations/{id}/ask/stream` | Ask question with SSE streaming |
+```python
+async def _run_migrations():
+    connectable = create_async_engine(url, poolclass=NullPool)
+    async with connectable.connect() as connection:
+        await connection.run_sync(do_run_migrations)
+```
 
-### 11.3 Context Window Strategy
-1. Store every user question and assistant answer in `messages`.
-2. On each new question, fetch last **N** message pairs (default 5) from the same conversation.
-3. Build prompt:
-   ```
-   System: You are a helpful assistant. Use only the provided document context.
-   
-   Previous conversation:
-   User: <previous question>
-   Assistant: <previous answer>
-   ...
-   
-   Context from documents:
-   <retrieved chunks>
-   
-   User: <current question>
-   Assistant:
-   ```
-4. Trim history if total tokens exceed safe limit (e.g., 70% of model context window).
-5. Retrieved chunks always take priority in the prompt; history is summarized or truncated if needed.
+This applies any pending migrations before the app accepts requests. Safe for multi-instance deployments if migrations are idempotent (all DDL uses `IF NOT EXISTS`).
 
-### 11.4 UX Flow for Multi-Turn
-1. User lands on **Chat Page**.
-2. If no active conversation, auto-create one on first question.
-3. Each question/answer pair appears as a chat bubble.
-4. Sidebar shows conversation history list.
-5. User can click **New Chat** to start a fresh conversation.
-6. Citations are shown per assistant message.
+To create a new migration after schema changes:
+```bash
+cd backend
+alembic revision -m "add_foo_column"
+# Edit the generated file, then:
+alembic upgrade head
+```
 
-## 12. UI/UX Notes
-- Keep the interface minimal: light background, subtle shadows, rounded cards
-- Use a soft primary color (indigo/slate) and clear hover states
-- Citations should visually group by document (color badge or icon)
-- Empty states with friendly illustrations/messages
-- Toast notifications for upload success / deletion confirmation
-- Chat interface should feel like a clean, modern messaging app
+## 12. Docker Configuration
 
-## 13. Assumptions
-- PDFs contain selectable text (no scanned images/OCR).
-- Single-user / single-session app for this scope.
-- Groq API key is available and has sufficient quota.
-- MinIO is available via Docker Compose.
-- Development runs on `localhost`.
+- **Backend Dockerfile**: `python:3.11-slim`, installs `pyproject.toml` deps with `pip install -e .`, copies source, runs `uvicorn app.main:app`
+- **backend volume mount** (`./backend:/app`): hot-reload in development (uvicorn watches file changes)
+- **model_cache volume** (`/root/.cache`): persists HuggingFace/SentenceTransformer model downloads across container restarts
+- **Frontend**: standard Vite dev server on port 3000
+
+## 13. Coding Conventions
+
+- Type hints on all function signatures
+- Async for all I/O (DB, MinIO, LLM, embedding)
+- CPU-bound ML inference wrapped in `asyncio.to_thread`
+- No global mutable state except the asyncpg pool (singleton)
+- Services lazy-load models on first use, not at import time
+- Comments only for non-obvious invariants (not for "what the code does")
+- No backwards-compatibility shims — delete unused code

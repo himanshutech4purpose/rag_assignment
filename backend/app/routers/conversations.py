@@ -1,218 +1,165 @@
-import json
-import uuid
+"""Conversation and Q&A endpoints."""
 
-from fastapi import APIRouter, HTTPException
+import json
+from uuid import UUID
+
+from fastapi import APIRouter
 from fastapi.responses import StreamingResponse
 
-from app.config import settings
-from app.database import get_pool
+from app.config import get_settings
+from app.logging_config import get_logger
+from app.dependencies import (
+    ConversationServiceDep,
+    DBConnection,
+    LLMDep,
+    RetrievalDep,
+)
+from app.exceptions import LLMServiceError, ValidationError
 from app.models.schemas import (
     AskRequest,
     AskResponse,
     ConversationCreate,
     ConversationOut,
-    ConversationWithMessages,
     ConversationsList,
+    ConversationWithMessages,
 )
-from app.services.llm import answer_question, stream_answer
-from app.services.vector_store import has_chunks, search_chunks
+from app.repositories import conversation_repo
 
-router = APIRouter()
+logger = get_logger(__name__)
+router = APIRouter(tags=["conversations"])
 
 
 @router.post("/conversations", response_model=ConversationOut, status_code=201)
-async def create_conversation(body: ConversationCreate):
-    pool = get_pool()
-    title = body.title or "New conversation"
-    async with pool.acquire() as conn:
-        row = await conn.fetchrow(
-            """
-            INSERT INTO conversations (title, updated_at)
-            VALUES ($1, NOW())
-            RETURNING id, title, created_at, updated_at
-            """,
-            title,
-        )
-    return dict(row)
+async def create_conversation(
+    conn: DBConnection,
+    conversation_service: ConversationServiceDep,
+    body: ConversationCreate,
+):
+    conversation = await conversation_service.create(conn, body.title)
+    return conversation
 
 
 @router.get("/conversations", response_model=ConversationsList)
-async def list_conversations():
-    pool = get_pool()
-    async with pool.acquire() as conn:
-        rows = await conn.fetch(
-            "SELECT id, title, created_at, updated_at FROM conversations ORDER BY updated_at DESC"
-        )
-    return {"conversations": [dict(r) for r in rows]}
+async def list_conversations(
+    conn: DBConnection,
+    conversation_service: ConversationServiceDep,
+):
+    conversations = await conversation_service.list_all(conn)
+    return {"conversations": conversations}
 
 
 @router.get("/conversations/{conversation_id}", response_model=ConversationWithMessages)
-async def get_conversation(conversation_id: str):
-    pool = get_pool()
-    async with pool.acquire() as conn:
-        conv = await conn.fetchrow(
-            "SELECT id, title, created_at, updated_at FROM conversations WHERE id = $1",
-            conversation_id,
-        )
-        if not conv:
-            raise HTTPException(status_code=404, detail="Conversation not found")
-
-        messages = await conn.fetch(
-            "SELECT id, role, content, sources, created_at FROM messages WHERE conversation_id = $1 ORDER BY id ASC",
-            conversation_id,
-        )
-    parsed_messages = []
-    for m in messages:
-        msg = dict(m)
-        if isinstance(msg.get("sources"), str):
-            msg["sources"] = json.loads(msg["sources"])
-        parsed_messages.append(msg)
-    return {**dict(conv), "messages": parsed_messages}
+async def get_conversation(
+    conn: DBConnection,
+    conversation_service: ConversationServiceDep,
+    conversation_id: UUID,
+):
+    conversation, messages = await conversation_service.get_with_messages(
+        conn, conversation_id
+    )
+    return {
+        "id": conversation.id,
+        "title": conversation.title,
+        "created_at": conversation.created_at,
+        "updated_at": conversation.updated_at,
+        "messages": messages,
+    }
 
 
 @router.delete("/conversations/{conversation_id}")
-async def delete_conversation(conversation_id: str):
-    pool = get_pool()
-    async with pool.acquire() as conn:
-        result = await conn.execute(
-            "DELETE FROM conversations WHERE id = $1", conversation_id
-        )
-    if result == "DELETE 0":
-        raise HTTPException(status_code=404, detail="Conversation not found")
+async def delete_conversation(
+    conn: DBConnection,
+    conversation_service: ConversationServiceDep,
+    conversation_id: UUID,
+):
+    await conversation_service.delete(conn, conversation_id)
     return {"message": "Conversation deleted successfully"}
 
 
 @router.post("/conversations/{conversation_id}/ask", response_model=AskResponse)
-async def ask_question(conversation_id: str, body: AskRequest):
-    if not body.question.strip():
-        raise HTTPException(status_code=400, detail="Question cannot be empty")
+async def ask_question(
+    conn: DBConnection,
+    conversation_service: ConversationServiceDep,
+    retrieval_service: RetrievalDep,
+    llm_service: LLMDep,
+    conversation_id: UUID,
+    body: AskRequest,
+):
+    if not await retrieval_service.has_chunks(conn):
+        raise ValidationError("Upload documents before asking questions")
 
-    pool = get_pool()
-    async with pool.acquire() as conn:
-        conv = await conn.fetchrow(
-            "SELECT id FROM conversations WHERE id = $1", conversation_id
-        )
-    if not conv:
-        raise HTTPException(status_code=404, detail="Conversation not found")
+    history = await conversation_service.add_user_message(
+        conn, conversation_id, body.question, body.history_limit
+    )
+    chunks = await retrieval_service.search(conn, body.question)
 
-    if not await has_chunks(pool):
-        raise HTTPException(
-            status_code=400, detail="Upload documents before asking questions"
-        )
-
-    async with pool.acquire() as conn:
-        await conn.execute(
-            "INSERT INTO messages (conversation_id, role, content) VALUES ($1, 'user', $2)",
-            conversation_id,
-            body.question,
-        )
-
-        history = await conn.fetch(
-            """
-            SELECT role, content FROM messages
-            WHERE conversation_id = $1
-            ORDER BY id DESC
-            LIMIT 10
-            """,
-            conversation_id,
-        )
-    history = list(reversed(history))
-
-    chunks = await search_chunks(pool, body.question, settings.top_k)
-
-    answer = answer_question(
-        body.question,
-        chunks,
-        history,
+    answer = await llm_service.answer(
+        question=body.question,
+        chunks=chunks,
+        history=history,
         provider=body.provider,
         model=body.model,
         api_key=body.api_key,
+        system_prompt=body.system_prompt,
+        max_tokens=body.max_tokens,
     )
 
-    async with pool.acquire() as conn:
-        await conn.execute(
-            "INSERT INTO messages (conversation_id, role, content, sources) VALUES ($1, 'assistant', $2, $3)",
-            conversation_id,
-            answer,
-            json.dumps(chunks),
-        )
-        await conn.execute(
-            "UPDATE conversations SET updated_at = NOW() WHERE id = $1", conversation_id
-        )
+    sources = [c.to_dict() for c in chunks]
+    await conversation_service.save_assistant_message(
+        conn, conversation_id, answer, sources
+    )
 
-    return {"answer": answer, "sources": chunks}
+    return {"answer": answer, "sources": sources}
 
 
 @router.post("/conversations/{conversation_id}/ask/stream")
-async def ask_stream(conversation_id: str, body: AskRequest):
-    if not body.question.strip():
-        raise HTTPException(status_code=400, detail="Question cannot be empty")
+async def ask_stream(
+    conn: DBConnection,
+    conversation_service: ConversationServiceDep,
+    retrieval_service: RetrievalDep,
+    llm_service: LLMDep,
+    conversation_id: UUID,
+    body: AskRequest,
+):
+    if not await retrieval_service.has_chunks(conn):
+        raise ValidationError("Upload documents before asking questions")
 
-    pool = get_pool()
-    async with pool.acquire() as conn:
-        conv = await conn.fetchrow(
-            "SELECT id FROM conversations WHERE id = $1", conversation_id
-        )
-    if not conv:
-        raise HTTPException(status_code=404, detail="Conversation not found")
-
-    if not await has_chunks(pool):
-        raise HTTPException(
-            status_code=400, detail="Upload documents before asking questions"
-        )
-
-    async with pool.acquire() as conn:
-        await conn.execute(
-            "INSERT INTO messages (conversation_id, role, content) VALUES ($1, 'user', $2)",
-            conversation_id,
-            body.question,
-        )
-
-        history = await conn.fetch(
-            """
-            SELECT role, content FROM messages
-            WHERE conversation_id = $1
-            ORDER BY id DESC
-            LIMIT 10
-            """,
-            conversation_id,
-        )
-    history = list(reversed(history))
-
-    chunks = await search_chunks(pool, body.question, settings.top_k)
+    history = await conversation_service.add_user_message(
+        conn, conversation_id, body.question, body.history_limit
+    )
+    chunks = await retrieval_service.search(conn, body.question)
+    sources = [c.to_dict() for c in chunks]
 
     async def event_generator():
         answer_parts = []
         try:
-            async for token in stream_answer(
-                body.question,
-                chunks,
-                history,
+            async for token in llm_service.stream_answer(
+                question=body.question,
+                chunks=chunks,
+                history=history,
                 provider=body.provider,
                 model=body.model,
                 api_key=body.api_key,
+                system_prompt=body.system_prompt,
+                max_tokens=body.max_tokens,
             ):
                 answer_parts.append(token)
                 yield f"data: {token}\n\n"
 
             answer = "".join(answer_parts)
-            async with pool.acquire() as conn:
-                await conn.execute(
-                    "INSERT INTO messages (conversation_id, role, content, sources) VALUES ($1, 'assistant', $2, $3)",
-                    conversation_id,
-                    answer,
-                    json.dumps(chunks),
+            async with conn.transaction():
+                await conversation_repo.add_message(
+                    conn, conversation_id, "assistant", answer, sources
                 )
-                await conn.execute(
-                    "UPDATE conversations SET updated_at = NOW() WHERE id = $1",
-                    conversation_id,
-                )
+                await conversation_repo.touch(conn, conversation_id)
 
-            sources = json.dumps(chunks)
-            yield f"event: sources\ndata: {sources}\n\n"
+            yield f"event: sources\ndata: {json.dumps(sources)}\n\n"
             yield "data: [DONE]\n\n"
-        except Exception:
+        except LLMServiceError:
             yield "event: error\ndata: {\"error\": \"LLM service temporarily unavailable\"}\n\n"
+        except Exception:
+            logger.exception("Unexpected error during streaming (conversation_id=%s)", conversation_id)
+            yield "event: error\ndata: {\"error\": \"An unexpected error occurred\"}\n\n"
 
     return StreamingResponse(
         event_generator(),

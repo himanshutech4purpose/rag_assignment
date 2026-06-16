@@ -1,16 +1,20 @@
 import { useState } from 'react';
-import { uploadFiles } from '../api';
+import { uploadFiles, getDocumentChunks } from '../api';
 
 export default function Upload() {
   const [files, setFiles] = useState([]);
   const [dragActive, setDragActive] = useState(false);
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState(null);
+  const [chunksByDoc, setChunksByDoc] = useState({});
+  const [expandedDoc, setExpandedDoc] = useState(null);
   const [error, setError] = useState(null);
 
   const handleFiles = (selected) => {
     setError(null);
     setResult(null);
+    setChunksByDoc({});
+    setExpandedDoc(null);
     const pdfFiles = Array.from(selected).filter((f) => f.type === 'application/pdf');
     if (pdfFiles.length !== selected.length) {
       setError('Only PDF files are supported.');
@@ -32,10 +36,37 @@ export default function Upload() {
     setLoading(true);
     setError(null);
     setResult(null);
+    setChunksByDoc({});
+    setExpandedDoc(null);
     try {
-      const { data } = await uploadFiles(files);
+      const chunkSize = localStorage.getItem('rag_chunk_size')
+        ? parseInt(localStorage.getItem('rag_chunk_size'), 10)
+        : undefined;
+      const chunkOverlap = localStorage.getItem('rag_chunk_overlap')
+        ? parseInt(localStorage.getItem('rag_chunk_overlap'), 10)
+        : undefined;
+      const { data } = await uploadFiles(files, { chunkSize, chunkOverlap });
+
       const totalChunks = data.documents.reduce((sum, d) => sum + d.chunks_inserted, 0);
-      setResult(`${data.documents.length} documents indexed, ${totalChunks} chunks stored`);
+      const totalImages = data.documents.reduce((sum, d) => sum + (d.images_ignored || 0), 0);
+      const imageNotice =
+        totalImages > 0
+          ? ` Found ${totalImages} image${totalImages === 1 ? '' : 's'} in PDF${
+              data.documents.length === 1 ? '' : 's'
+            } which ${totalImages === 1 ? 'was' : 'were'} ignored.`
+          : '';
+      setResult(
+        `${data.documents.length} document${data.documents.length === 1 ? '' : 's'} indexed, ${totalChunks} chunk${totalChunks === 1 ? '' : 's'} stored.${imageNotice}`
+      );
+
+      const chunksMap = {};
+      for (const doc of data.documents) {
+        if (doc.chunks_inserted > 0) {
+          const { data: chunks } = await getDocumentChunks(doc.id);
+          chunksMap[doc.id] = { name: doc.name, chunks };
+        }
+      }
+      setChunksByDoc(chunksMap);
       setFiles([]);
     } catch (err) {
       setError(err.response?.data?.detail || 'Failed to process files. Please try again.');
@@ -106,6 +137,39 @@ export default function Upload() {
       >
         {loading ? 'Processing...' : 'Upload PDFs'}
       </button>
+
+      {Object.keys(chunksByDoc).length > 0 && (
+        <div className="mt-8 space-y-4">
+          <h3 className="text-lg font-semibold text-slate-800">Chunks</h3>
+          {Object.entries(chunksByDoc).map(([docId, { name, chunks }]) => (
+            <div key={docId} className="bg-white border rounded-lg overflow-hidden">
+              <button
+                onClick={() => setExpandedDoc(expandedDoc === docId ? null : docId)}
+                className="w-full px-4 py-3 flex items-center justify-between bg-slate-50 hover:bg-slate-100 transition"
+              >
+                <span className="font-medium text-slate-700">{name}</span>
+                <span className="text-sm text-slate-500">
+                  {chunks.length} chunk{chunks.length === 1 ? '' : 's'}
+                </span>
+              </button>
+              {expandedDoc === docId && (
+                <div className="divide-y max-h-96 overflow-y-auto">
+                  {chunks.map((chunk) => (
+                    <div key={chunk.id} className="px-4 py-3 text-sm">
+                      <div className="flex items-center gap-2 text-xs text-slate-500 mb-1">
+                        <span>Chunk {chunk.chunk_index}</span>
+                        <span>•</span>
+                        <span>Page {chunk.page_number ?? 'unknown'}</span>
+                      </div>
+                      <p className="text-slate-700 whitespace-pre-wrap">{chunk.content}</p>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }

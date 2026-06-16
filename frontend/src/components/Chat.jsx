@@ -46,6 +46,13 @@ export default function Chat({ conversationId, onConversationsChange }) {
     const provider = localStorage.getItem('llm_provider') || 'groq';
     const model = localStorage.getItem('llm_model') || undefined;
     const apiKey = localStorage.getItem('llm_api_key') || undefined;
+    const systemPrompt = localStorage.getItem('rag_system_prompt') || undefined;
+    const maxTokens = localStorage.getItem('rag_max_tokens')
+      ? parseInt(localStorage.getItem('rag_max_tokens'), 10)
+      : undefined;
+    const historyLimit = localStorage.getItem('rag_history_limit')
+      ? parseInt(localStorage.getItem('rag_history_limit'), 10)
+      : undefined;
 
     setQuestion('');
     setLoading(true);
@@ -58,6 +65,9 @@ export default function Chat({ conversationId, onConversationsChange }) {
       provider,
       model,
       apiKey,
+      systemPrompt,
+      maxTokens,
+      historyLimit,
       onToken: (token) => setPartialAnswer((prev) => prev + token),
       onSources: (sources) => setPartialSources(sources),
       onDone: () => {

@@ -1,28 +1,53 @@
+"""Cross-encoder reranking service."""
+
+import asyncio
+
 from sentence_transformers import CrossEncoder
 
-from app.config import settings
+from app.config import Settings
+from app.logging_config import get_logger
+from app.models.domain import RetrievedChunk
 
-_reranker: CrossEncoder | None = None
-
-
-def get_reranker() -> CrossEncoder:
-    global _reranker
-    if _reranker is None:
-        _reranker = CrossEncoder(settings.reranker_model)
-    return _reranker
+logger = get_logger(__name__)
 
 
-def rerank(query: str, chunks: list[dict], top_k: int) -> list[dict]:
-    """Re-rank chunks with a cross-encoder and return the top_k results."""
-    if not chunks:
-        return []
+class RerankerService:
+    """Wrapper around a cross-encoder reranker."""
 
-    pairs = [(query, chunk["content"]) for chunk in chunks]
-    scores = get_reranker().predict(pairs, convert_to_numpy=True)
+    def __init__(self, settings: Settings):
+        self._settings = settings
+        self._model: CrossEncoder | None = None
 
-    scored_chunks = [
-        {**chunk, "rerank_score": float(score)}
-        for chunk, score in zip(chunks, scores)
-    ]
-    scored_chunks.sort(key=lambda x: x["rerank_score"], reverse=True)
-    return scored_chunks[:top_k]
+    def _load(self) -> CrossEncoder:
+        if self._model is None:
+            logger.info("Loading reranker model: %s", self._settings.reranker_model)
+            self._model = CrossEncoder(self._settings.reranker_model)
+        return self._model
+
+    def _rerank(
+        self, query: str, chunks: list[RetrievedChunk], top_k: int
+    ) -> list[RetrievedChunk]:
+        if not chunks:
+            return []
+
+        pairs = [(query, chunk.content) for chunk in chunks]
+        scores = self._load().predict(pairs, convert_to_numpy=True)
+
+        scored = [
+            RetrievedChunk(
+                id=chunk.id,
+                document_name=chunk.document_name,
+                page_number=chunk.page_number,
+                chunk_index=chunk.chunk_index,
+                content=chunk.content,
+                score=float(score),
+            )
+            for chunk, score in zip(chunks, scores)
+        ]
+        scored.sort(key=lambda x: x.score, reverse=True)
+        return scored[:top_k]
+
+    async def rerank(
+        self, query: str, chunks: list[RetrievedChunk], top_k: int
+    ) -> list[RetrievedChunk]:
+        return await asyncio.to_thread(self._rerank, query, chunks, top_k)
