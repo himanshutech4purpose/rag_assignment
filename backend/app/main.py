@@ -14,12 +14,9 @@ from app.exceptions import setup_exception_handlers
 from app.logging_config import configure_logging, get_logger
 from app.routers import conversations, documents, health
 from app.services.conversation_service import ConversationService
-from app.services.embeddings import EmbeddingService
-from app.services.ingestion import IngestionService
+from app.services.ingestion import EmbeddingService, IngestionService, StorageService
 from app.services.llm import LLMService
-from app.services.reranker import RerankerService
-from app.services.retrieval import RetrievalService
-from app.services.storage import StorageService
+from app.services.retrieval import RerankerService, RetrievalService
 
 logger = get_logger(__name__)
 

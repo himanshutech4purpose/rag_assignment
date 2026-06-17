@@ -1,10 +1,14 @@
-"""Database connection pool, transaction management, and migration runner."""
+"""Database engine, session management, transaction handling, and migrations."""
 
+import asyncio
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 
-import asyncpg
-from sqlalchemy import pool as sa_pool
-from sqlalchemy.ext.asyncio import create_async_engine
+from sqlalchemy.ext.asyncio import (
+    AsyncSession,
+    async_sessionmaker,
+    create_async_engine,
+)
 
 from alembic import command
 from alembic.config import Config
@@ -14,77 +18,84 @@ from app.logging_config import get_logger
 
 logger = get_logger(__name__)
 
-_pool: asyncpg.Pool | None = None
+settings = get_settings()
 
 
-def _get_alembic_url() -> str:
-    """Return a SQLAlchemy-compatible asyncpg URL for Alembic."""
-    url = get_settings().database_url
+def _get_async_database_url() -> str:
+    """Return an asyncpg-compatible URL for SQLAlchemy async engines."""
+    url = settings.database_url
     if url.startswith("postgresql://") and not url.startswith("postgresql+asyncpg://"):
         url = url.replace("postgresql://", "postgresql+asyncpg://", 1)
     return url
 
 
-async def _run_migrations() -> None:
-    """Run Alembic migrations asynchronously using an async SQLAlchemy engine."""
-    connectable = create_async_engine(_get_alembic_url(), poolclass=sa_pool.NullPool)
+# Global async engine. Created at import time so Alembic and the app share the
+# same connection pool. Disposed explicitly in close_db during shutdown.
+engine = create_async_engine(
+    _get_async_database_url(),
+    future=True,
+    echo=False,
+    pool_pre_ping=True,
+)
 
-    def do_run_migrations(connection) -> None:
+# Session factory used by the dependency injection system and manual transactions.
+AsyncSessionLocal = async_sessionmaker(
+    engine,
+    class_=AsyncSession,
+    expire_on_commit=False,
+    autoflush=False,
+)
+
+
+async def _run_migrations() -> None:
+    """Run Alembic migrations from the async application lifespan.
+
+    ``command.upgrade`` is synchronous and internally creates its own async
+    engine/event loop via ``alembic/env.py``. Running it in a separate thread
+    avoids nesting event loops when called from within Uvicorn's loop.
+    """
+
+    def do_run_migrations() -> None:
         alembic_cfg = Config("alembic.ini")
-        alembic_cfg.attributes["connection"] = connection
         command.upgrade(alembic_cfg, "head")
 
-    try:
-        async with connectable.connect() as connection:
-            await connection.run_sync(do_run_migrations)
-        logger.info("Database migrations applied successfully")
-    finally:
-        await connectable.dispose()
+    await asyncio.to_thread(do_run_migrations)
+    logger.info("Database migrations applied successfully")
 
 
-async def init_db() -> asyncpg.Pool:
-    """Initialize the asyncpg connection pool and run migrations."""
-    global _pool
-    settings = get_settings()
-
-    _pool = await asyncpg.create_pool(
-        settings.database_url,
-        min_size=settings.db_pool_min_size,
-        max_size=settings.db_pool_max_size,
-        command_timeout=settings.db_command_timeout,
-    )
-    logger.info("Database pool initialized")
-
+async def init_db() -> None:
+    """Initialize the database layer and run pending migrations."""
     await _run_migrations()
-    return _pool
 
 
 async def close_db() -> None:
-    """Close the asyncpg connection pool."""
-    global _pool
-    if _pool is not None:
-        await _pool.close()
-        _pool = None
-        logger.info("Database pool closed")
+    """Dispose the SQLAlchemy engine and close the connection pool."""
+    await engine.dispose()
+    logger.info("Database engine disposed")
 
 
-def get_pool() -> asyncpg.Pool:
-    """Return the initialized connection pool."""
-    if _pool is None:
-        raise RuntimeError("Database pool has not been initialized")
-    return _pool
+async def get_session() -> AsyncGenerator[AsyncSession, None]:
+    """Yield an async session that auto-commits on success and rolls back on error.
+
+    Intended for use as a FastAPI dependency. Closing is handled by the
+    ``AsyncSessionLocal`` context manager.
+    """
+    async with AsyncSessionLocal() as session:
+        try:
+            yield session
+            await session.commit()
+        except Exception:
+            await session.rollback()
+            raise
 
 
 @asynccontextmanager
-async def get_connection():
-    """Acquire a single connection from the pool and release it on exit."""
-    async with get_pool().acquire() as conn:
-        yield conn
+async def transaction() -> AsyncGenerator[AsyncSession, None]:
+    """Provide a transactional scope around a series of operations.
 
-
-@asynccontextmanager
-async def transaction():
-    """Acquire a connection and wrap operations in a transaction."""
-    async with get_connection() as conn:
-        async with conn.transaction():
-            yield conn
+    Useful for services that need to manage their own transaction boundaries
+    without going through the FastAPI dependency layer.
+    """
+    async with AsyncSessionLocal() as session:
+        async with session.begin():
+            yield session

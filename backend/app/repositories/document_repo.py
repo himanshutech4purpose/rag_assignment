@@ -1,86 +1,82 @@
-"""Document repository: data access for the `documents` table."""
+"""Document repository: data access for the ``documents`` table."""
 
 from uuid import UUID
 
-import asyncpg
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.exceptions import NotFoundError
-from app.models.domain import Document
+from app.domain import Document as DocumentDTO
+from app.models.tables import Document as DocumentORM
 
 
 async def create(
-    conn: asyncpg.Connection,
+    session: AsyncSession,
     document_id: UUID,
     name: str,
     size_bytes: int,
     minio_object: str,
     status: str,
-) -> Document:
-    row = await conn.fetchrow(
-        """
-        INSERT INTO documents (id, name, size_bytes, minio_object, status)
-        VALUES ($1, $2, $3, $4, $5)
-        RETURNING id, name, size_bytes, status, minio_object, created_at
-        """,
-        document_id,
-        name,
-        size_bytes,
-        minio_object,
-        status,
+) -> DocumentDTO:
+    document = DocumentORM(
+        id=document_id,
+        name=name,
+        size_bytes=size_bytes,
+        minio_object=minio_object,
+        status=status,
     )
-    return _to_domain(row)
+    session.add(document)
+    await session.flush()
+    await session.refresh(document)
+    return _to_domain(document)
 
 
 async def update_status(
-    conn: asyncpg.Connection, document_id: UUID, status: str
+    session: AsyncSession, document_id: UUID, status: str
 ) -> None:
-    await conn.execute(
-        "UPDATE documents SET status = $1 WHERE id = $2",
-        status,
-        document_id,
-    )
-
-
-async def list_all(conn: asyncpg.Connection) -> list[Document]:
-    rows = await conn.fetch(
-        "SELECT id, name, size_bytes, status, minio_object, created_at "
-        "FROM documents ORDER BY created_at DESC"
-    )
-    return [_to_domain(r) for r in rows]
-
-
-async def get(conn: asyncpg.Connection, document_id: UUID) -> Document:
-    row = await conn.fetchrow(
-        "SELECT id, name, size_bytes, status, minio_object, created_at "
-        "FROM documents WHERE id = $1",
-        document_id,
-    )
-    if not row:
+    document = await session.get(DocumentORM, document_id)
+    if document is None:
         raise NotFoundError("Document", str(document_id))
-    return _to_domain(row)
+    document.status = status
 
 
-async def get_object_name(conn: asyncpg.Connection, document_id: UUID) -> str:
-    row = await conn.fetchrow(
-        "SELECT minio_object FROM documents WHERE id = $1", document_id
+async def list_all(session: AsyncSession) -> list[DocumentDTO]:
+    result = await session.execute(
+        select(DocumentORM).order_by(DocumentORM.created_at.desc())
     )
-    if not row:
+    return [_to_domain(doc) for doc in result.scalars().all()]
+
+
+async def get(session: AsyncSession, document_id: UUID) -> DocumentDTO:
+    document = await session.get(DocumentORM, document_id)
+    if document is None:
         raise NotFoundError("Document", str(document_id))
-    return row["minio_object"]
+    return _to_domain(document)
 
 
-async def delete(conn: asyncpg.Connection, document_id: UUID) -> None:
-    result = await conn.execute("DELETE FROM documents WHERE id = $1", document_id)
-    if result == "DELETE 0":
+async def get_object_name(session: AsyncSession, document_id: UUID) -> str:
+    result = await session.execute(
+        select(DocumentORM.minio_object).where(DocumentORM.id == document_id)
+    )
+    object_name = result.scalar_one_or_none()
+    if object_name is None:
         raise NotFoundError("Document", str(document_id))
+    return object_name
 
 
-def _to_domain(row: asyncpg.Record) -> Document:
-    return Document(
-        id=row["id"],
-        name=row["name"],
-        size_bytes=row["size_bytes"],
-        status=row["status"],
-        minio_object=row["minio_object"],
-        created_at=row["created_at"],
+async def delete(session: AsyncSession, document_id: UUID) -> None:
+    document = await session.get(DocumentORM, document_id)
+    if document is None:
+        raise NotFoundError("Document", str(document_id))
+    await session.delete(document)
+
+
+def _to_domain(document: DocumentORM) -> DocumentDTO:
+    return DocumentDTO(
+        id=document.id,
+        name=document.name,
+        size_bytes=document.size_bytes,
+        status=document.status,
+        minio_object=document.minio_object,
+        created_at=document.created_at,
     )

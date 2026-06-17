@@ -1,27 +1,25 @@
 """FastAPI dependency providers for the application."""
 
+from collections.abc import AsyncGenerator
 from typing import Annotated
 
-import asyncpg
 from fastapi import Depends, Request
+from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.database import get_pool
+from app.database import get_session
 from app.services.conversation_service import ConversationService
-from app.services.embeddings import EmbeddingService
-from app.services.ingestion import IngestionService
+from app.services.ingestion import EmbeddingService, IngestionService, StorageService
 from app.services.llm import LLMService
-from app.services.reranker import RerankerService
-from app.services.retrieval import RetrievalService
-from app.services.storage import StorageService
+from app.services.retrieval import RerankerService, RetrievalService
 
 
-async def get_db_connection() -> asyncpg.Connection:
-    """Yield a single database connection from the pool."""
-    async with get_pool().acquire() as conn:
-        yield conn
+async def get_db_session() -> AsyncGenerator[AsyncSession, None]:
+    """Yield an async SQLAlchemy session for the current request."""
+    async for session in get_session():
+        yield session
 
 
-DBConnection = Annotated[asyncpg.Connection, Depends(get_db_connection)]
+DBSession = Annotated[AsyncSession, Depends(get_db_session)]
 
 
 def _get_app_state(request: Request):
@@ -74,4 +72,6 @@ def get_conversation_service(request: Request) -> ConversationService:
     return request.app.state.conversation_service
 
 
-ConversationServiceDep = Annotated[ConversationService, Depends(get_conversation_service)]
+ConversationServiceDep = Annotated[
+    ConversationService, Depends(get_conversation_service)
+]

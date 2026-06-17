@@ -18,10 +18,16 @@
 │   │   ├── dependencies.py               # FastAPI Depends providers
 │   │   ├── exceptions.py                 # Domain exceptions + global handlers
 │   │   ├── logging_config.py             # Structured logging setup
+│   │   ├── domain/
+│   │   │   ├── __init__.py
+│   │   │   └── models.py                 # Internal dataclasses (Chunk, Message, …)
 │   │   ├── models/
 │   │   │   ├── __init__.py
-│   │   │   ├── domain.py                 # Internal dataclasses (Chunk, Message, …)
-│   │   │   └── schemas.py                # Pydantic request/response schemas
+│   │   │   ├── base.py                   # SQLAlchemy declarative base
+│   │   │   └── tables.py                 # SQLAlchemy ORM table models
+│   │   ├── schemas/
+│   │   │   ├── __init__.py
+│   │   │   └── api.py                    # Pydantic request/response schemas
 │   │   ├── repositories/
 │   │   │   ├── __init__.py
 │   │   │   ├── chunk_repo.py             # document_chunks SQL + RRF fusion
@@ -34,15 +40,19 @@
 │   │   │   └── conversations.py          # /api/conversations/*
 │   │   └── services/
 │   │       ├── __init__.py
-│   │       ├── ingestion.py              # Upload → parse → chunk → embed → store
-│   │       ├── retrieval.py              # Hybrid search + RRF + reranking
+│   │       ├── ingestion/                # Upload → parse → chunk → embed → store
+│   │       │   ├── __init__.py
+│   │       │   ├── ingestion.py
+│   │       │   ├── chunker.py            # Character-based text splitter
+│   │       │   ├── embeddings.py         # SentenceTransformer wrapper (async)
+│   │       │   ├── pdf_parser.py         # pypdf text + image extractor
+│   │       │   └── storage.py            # MinIO wrapper (async)
+│   │       ├── retrieval/                # Hybrid search + RRF + reranking
+│   │       │   ├── __init__.py
+│   │       │   ├── retrieval.py
+│   │       │   └── reranker.py           # CrossEncoder wrapper (async)
 │   │       ├── conversation_service.py   # Title gen, history, message persistence
-│   │       ├── embeddings.py             # SentenceTransformer wrapper (async)
-│   │       ├── reranker.py               # CrossEncoder wrapper (async)
-│   │       ├── llm.py                    # Groq / OpenAI via LangChain
-│   │       ├── storage.py                # MinIO wrapper (async)
-│   │       ├── chunker.py                # Character-based text splitter
-│   │       └── pdf_parser.py             # pypdf text + image extractor
+│   │       └── llm.py                    # Groq / OpenAI via LangChain
 │   ├── alembic.ini
 │   ├── pyproject.toml
 │   └── Dockerfile
@@ -225,7 +235,7 @@ SSE event format:
 
 ## 5. Service Layer
 
-### `IngestionService` (`services/ingestion.py`)
+### `IngestionService` (`services/ingestion/ingestion.py`)
 ```
 ingest(filename, content, chunk_size?, chunk_overlap?):
   1. Generate UUID document_id
@@ -251,7 +261,7 @@ delete_document(conn, document_id):
   (DB delete happens before storage delete: failed DB → no orphan record)
 ```
 
-### `RetrievalService` (`services/retrieval.py`)
+### `RetrievalService` (`services/retrieval/retrieval.py`)
 ```
 search(conn, query_text, top_k?):
   1. embed([query_text])[0]                              → query_embedding
@@ -301,16 +311,16 @@ stream_answer(...) → AsyncIterator[str]:
       yield str(chunk.content)
 ```
 
-### `EmbeddingService` (`services/embeddings.py`)
+### `EmbeddingService` (`services/ingestion/embeddings.py`)
 - Lazy-loads `SentenceTransformer` model on first use
 - Uses `asyncio.to_thread` so CPU-bound encoding doesn't block the event loop
 - Returns `list[list[float]]` (dim=384)
 
-### `RerankerService` (`services/reranker.py`)
+### `RerankerService` (`services/retrieval/reranker.py`)
 - Lazy-loads `CrossEncoder` model
 - `rerank(query, chunks, top_k)` → runs `asyncio.to_thread`, returns top-K by cross-encoder score
 
-### `StorageService` (`services/storage.py`)
+### `StorageService` (`services/ingestion/storage.py`)
 - Wraps `Minio` client with `asyncio.to_thread` for all operations
 - `ensure_bucket()`: idempotent bucket creation at startup
 - Raises `StorageError` (→ HTTP 500) on any failure

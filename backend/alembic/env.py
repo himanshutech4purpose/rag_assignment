@@ -6,8 +6,19 @@ from sqlalchemy.ext.asyncio import create_async_engine
 
 from alembic import context
 
-# Load the application settings so DATABASE_URL is available.
+# Load application settings so DATABASE_URL is available.
 from app.config import get_settings
+
+# Import the declarative base and all table modules so ``Base.metadata``
+# contains the full schema graph. This is what enables ``alembic revision
+# --autogenerate`` to diff the models against the live database.
+from app.models.base import Base
+from app.models.tables import (  # noqa: F401
+    Conversation,
+    Document,
+    DocumentChunk,
+    Message,
+)
 
 settings = get_settings()
 
@@ -19,11 +30,8 @@ config = context.config
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
-# add your model's MetaData object here
-# for 'autogenerate' support
-# from myapp import mymodel
-# target_metadata = mymodel.Base.metadata
-target_metadata = None
+# Alembic compares the live database against this metadata during autogenerate.
+target_metadata = Base.metadata
 
 
 def get_database_url() -> str:
@@ -42,6 +50,8 @@ def run_migrations_offline() -> None:
         target_metadata=target_metadata,
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
+        compare_type=True,
+        compare_server_default=True,
     )
 
     with context.begin_transaction():
@@ -49,7 +59,12 @@ def run_migrations_offline() -> None:
 
 
 def do_run_migrations(connection) -> None:
-    context.configure(connection=connection, target_metadata=target_metadata)
+    context.configure(
+        connection=connection,
+        target_metadata=target_metadata,
+        compare_type=True,
+        compare_server_default=True,
+    )
 
     with context.begin_transaction():
         context.run_migrations()

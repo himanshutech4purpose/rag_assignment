@@ -24,6 +24,8 @@ export const createConversation = (title) => api.post('/conversations', { title 
 export const listConversations = () => api.get('/conversations');
 export const getConversation = (id) => api.get(`/conversations/${id}`);
 export const deleteConversation = (id) => api.delete(`/conversations/${id}`);
+export const getMessageDebug = (conversationId, messageId) =>
+  api.get(`/conversations/${conversationId}/messages/${messageId}/debug`);
 
 export async function streamQuestion(
   conversationId,

@@ -54,7 +54,7 @@ class Settings(BaseSettings):
     reranker_model: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"
 
     # Conversation context
-    history_limit: int = 10
+    history_limit: int = 2
 
     # Upload limits
     max_upload_file_size: int = 10 * 1024 * 1024

@@ -22,8 +22,9 @@ const STORAGE_KEYS = {
   historyLimit: 'rag_history_limit',
 };
 
-export const DEFAULT_SYSTEM_PROMPT = `You are a helpful assistant. Use ONLY the following context to answer the question.
-Cite the source document name and chunk index for each fact you use.
+export const DEFAULT_SYSTEM_PROMPT = `You are a helpful assistant. Answer the question using the provided context and previous conversation.
+If the question asks about earlier parts of the conversation, use the previous conversation.
+Cite the source document name, page number, and chunk index for each fact you use from the context.
 
 Context:
 {context}
@@ -38,7 +39,7 @@ Answer:`;
 export const DEFAULT_CHUNK_SIZE = 1000;
 export const DEFAULT_CHUNK_OVERLAP = 200;
 export const DEFAULT_MAX_TOKENS = 4096;
-export const DEFAULT_HISTORY_LIMIT = 10;
+export const DEFAULT_HISTORY_LIMIT = 2;
 
 function parseIntOrDefault(value, defaultValue) {
   const parsed = parseInt(value, 10);
@@ -249,7 +250,7 @@ export default function SettingsPage() {
             className="w-full border border-slate-300 rounded-lg px-4 py-2.5 focus:outline-none focus:ring-2 focus:ring-indigo-500"
           />
           <p className="mt-1.5 text-xs text-slate-500">
-            Number of recent messages from the current conversation to include in the LLM context. Default is {DEFAULT_HISTORY_LIMIT}.
+            Number of recent user+assistant turns to include in the LLM context. Default is {DEFAULT_HISTORY_LIMIT}.
           </p>
         </div>
 
@@ -259,7 +260,7 @@ export default function SettingsPage() {
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
           <div>
             <label htmlFor="chunkSize" className="block text-sm font-medium text-slate-700 mb-2">
-              Chunk Size
+              Chunk Size (characters)
             </label>
             <input
               id="chunkSize"
@@ -273,12 +274,14 @@ export default function SettingsPage() {
               }}
               className="w-full border border-slate-300 rounded-lg px-4 py-2.5 focus:outline-none focus:ring-2 focus:ring-indigo-500"
             />
-            <p className="mt-1.5 text-xs text-slate-500">Default: {DEFAULT_CHUNK_SIZE}</p>
+            <p className="mt-1.5 text-xs text-slate-500">
+              Number of characters per chunk. Default: {DEFAULT_CHUNK_SIZE}
+            </p>
           </div>
 
           <div>
             <label htmlFor="chunkOverlap" className="block text-sm font-medium text-slate-700 mb-2">
-              Chunk Overlap
+              Chunk Overlap (characters)
             </label>
             <input
               id="chunkOverlap"
@@ -292,7 +295,9 @@ export default function SettingsPage() {
               }}
               className="w-full border border-slate-300 rounded-lg px-4 py-2.5 focus:outline-none focus:ring-2 focus:ring-indigo-500"
             />
-            <p className="mt-1.5 text-xs text-slate-500">Default: {DEFAULT_CHUNK_OVERLAP}</p>
+            <p className="mt-1.5 text-xs text-slate-500">
+              Number of overlapping characters between chunks. Default: {DEFAULT_CHUNK_OVERLAP}
+            </p>
           </div>
         </div>
         <p className="text-xs text-slate-500">

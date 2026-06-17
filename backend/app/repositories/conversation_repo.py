@@ -4,142 +4,149 @@ import json
 from typing import Any
 from uuid import UUID
 
-import asyncpg
+from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.exceptions import NotFoundError
-from app.models.domain import Conversation, Message
+from app.domain import Conversation as ConversationDTO
+from app.domain import Message as MessageDTO
+from app.models.tables import Conversation as ConversationORM
+from app.models.tables import Message as MessageORM
 
 
-async def create(conn: asyncpg.Connection, title: str | None) -> Conversation:
-    row = await conn.fetchrow(
-        """
-        INSERT INTO conversations (title, updated_at)
-        VALUES ($1, NOW())
-        RETURNING id, title, created_at, updated_at
-        """,
-        title,
+async def create(session: AsyncSession, title: str | None) -> ConversationDTO:
+    conversation = ConversationORM(title=title)
+    session.add(conversation)
+    await session.flush()
+    await session.refresh(conversation)
+    return _to_conversation(conversation)
+
+
+async def list_all(session: AsyncSession) -> list[ConversationDTO]:
+    result = await session.execute(
+        select(ConversationORM).order_by(ConversationORM.updated_at.desc())
     )
-    return _to_conversation(row)
+    return [_to_conversation(c) for c in result.scalars().all()]
 
 
-async def list_all(conn: asyncpg.Connection) -> list[Conversation]:
-    rows = await conn.fetch(
-        "SELECT id, title, created_at, updated_at FROM conversations ORDER BY updated_at DESC"
-    )
-    return [_to_conversation(r) for r in rows]
-
-
-async def get(conn: asyncpg.Connection, conversation_id: UUID) -> Conversation:
-    row = await conn.fetchrow(
-        "SELECT id, title, created_at, updated_at FROM conversations WHERE id = $1",
-        conversation_id,
-    )
-    if not row:
+async def get(session: AsyncSession, conversation_id: UUID) -> ConversationDTO:
+    conversation = await session.get(ConversationORM, conversation_id)
+    if conversation is None:
         raise NotFoundError("Conversation", str(conversation_id))
-    return _to_conversation(row)
+    return _to_conversation(conversation)
 
 
-async def exists(conn: asyncpg.Connection, conversation_id: UUID) -> bool:
-    row = await conn.fetchrow(
-        "SELECT 1 FROM conversations WHERE id = $1", conversation_id
+async def exists(session: AsyncSession, conversation_id: UUID) -> bool:
+    result = await session.execute(
+        select(ConversationORM.id).where(ConversationORM.id == conversation_id)
     )
-    return row is not None
+    return result.scalar_one_or_none() is not None
 
 
-async def delete(conn: asyncpg.Connection, conversation_id: UUID) -> None:
-    result = await conn.execute(
-        "DELETE FROM conversations WHERE id = $1", conversation_id
-    )
-    if result == "DELETE 0":
+async def delete(session: AsyncSession, conversation_id: UUID) -> None:
+    conversation = await session.get(ConversationORM, conversation_id)
+    if conversation is None:
         raise NotFoundError("Conversation", str(conversation_id))
+    await session.delete(conversation)
 
 
 async def update_title(
-    conn: asyncpg.Connection, conversation_id: UUID, title: str
+    session: AsyncSession, conversation_id: UUID, title: str
 ) -> None:
-    await conn.execute(
-        "UPDATE conversations SET title = $1, updated_at = NOW() WHERE id = $2",
-        title,
-        conversation_id,
-    )
+    conversation = await session.get(ConversationORM, conversation_id)
+    if conversation is None:
+        raise NotFoundError("Conversation", str(conversation_id))
+    conversation.title = title
 
 
-async def touch(conn: asyncpg.Connection, conversation_id: UUID) -> None:
-    await conn.execute(
-        "UPDATE conversations SET updated_at = NOW() WHERE id = $1", conversation_id
-    )
+async def touch(session: AsyncSession, conversation_id: UUID) -> None:
+    conversation = await session.get(ConversationORM, conversation_id)
+    if conversation is None:
+        raise NotFoundError("Conversation", str(conversation_id))
+    conversation.updated_at = func.now()
 
 
 async def add_message(
-    conn: asyncpg.Connection,
+    session: AsyncSession,
     conversation_id: UUID,
     role: str,
     content: str,
     sources: list[dict[str, Any]] | None = None,
-) -> Message:
-    sources_json = json.dumps(sources) if sources is not None else None
-    row = await conn.fetchrow(
-        """
-        INSERT INTO messages (conversation_id, role, content, sources)
-        VALUES ($1, $2, $3, $4)
-        RETURNING id, role, content, sources, created_at
-        """,
-        conversation_id,
-        role,
-        content,
-        sources_json,
+    debug_context: dict[str, Any] | None = None,
+) -> MessageDTO:
+    message = MessageORM(
+        conversation_id=conversation_id,
+        role=role,
+        content=content,
+        sources=sources,
+        debug_context=debug_context,
     )
-    return _to_message(row)
+    session.add(message)
+    await session.flush()
+    await session.refresh(message)
+    return _to_message(message)
 
 
 async def get_messages(
-    conn: asyncpg.Connection, conversation_id: UUID
-) -> list[Message]:
-    rows = await conn.fetch(
-        """
-        SELECT id, role, content, sources, created_at
-        FROM messages
-        WHERE conversation_id = $1
-        ORDER BY id ASC
-        """,
-        conversation_id,
+    session: AsyncSession, conversation_id: UUID
+) -> list[MessageDTO]:
+    result = await session.execute(
+        select(MessageORM)
+        .where(MessageORM.conversation_id == conversation_id)
+        .order_by(MessageORM.id.asc())
     )
-    return [_to_message(r) for r in rows]
+    return [_to_message(m) for m in result.scalars().all()]
 
 
 async def recent_messages(
-    conn: asyncpg.Connection, conversation_id: UUID, limit: int
-) -> list[Message]:
-    rows = await conn.fetch(
-        """
-        SELECT role, content FROM messages
-        WHERE conversation_id = $1
-        ORDER BY id DESC
-        LIMIT $2
-        """,
-        conversation_id,
-        limit,
+    session: AsyncSession, conversation_id: UUID, limit: int
+) -> list[MessageDTO]:
+    result = await session.execute(
+        select(MessageORM)
+        .where(MessageORM.conversation_id == conversation_id)
+        .order_by(MessageORM.id.desc())
+        .limit(limit)
     )
-    return [_to_message(r) for r in reversed(rows)]
+    messages = [_to_message(m) for m in result.scalars().all()]
+    return list(reversed(messages))
 
 
-def _to_conversation(row: asyncpg.Record) -> Conversation:
-    return Conversation(
-        id=row["id"],
-        title=row["title"],
-        created_at=row["created_at"],
-        updated_at=row["updated_at"],
+async def get_message(
+    session: AsyncSession, conversation_id: UUID, message_id: int
+) -> MessageDTO | None:
+    """Return a single message belonging to a conversation, or None."""
+    result = await session.execute(
+        select(MessageORM)
+        .where(MessageORM.id == message_id)
+        .where(MessageORM.conversation_id == conversation_id)
+    )
+    message = result.scalar_one_or_none()
+    if message is None:
+        return None
+    return _to_message(message)
+
+
+def _to_conversation(conversation: ConversationORM) -> ConversationDTO:
+    return ConversationDTO(
+        id=conversation.id,
+        title=conversation.title,
+        created_at=conversation.created_at,
+        updated_at=conversation.updated_at,
     )
 
 
-def _to_message(row: asyncpg.Record) -> Message:
-    sources = row.get("sources")
+def _to_message(message: MessageORM) -> MessageDTO:
+    sources = message.sources
     if isinstance(sources, str):
         sources = json.loads(sources)
-    return Message(
-        id=row.get("id"),
-        role=row["role"],
-        content=row["content"],
+    debug_context = message.debug_context
+    if isinstance(debug_context, str):
+        debug_context = json.loads(debug_context)
+    return MessageDTO(
+        id=message.id,
+        role=message.role,
+        content=message.content,
         sources=sources,
-        created_at=row.get("created_at"),
+        debug_context=debug_context,
+        created_at=message.created_at,
     )

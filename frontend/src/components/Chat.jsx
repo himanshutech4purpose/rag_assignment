@@ -1,7 +1,32 @@
 import { useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { getConversation, streamQuestion, listDocuments, createConversation } from '../api';
+import { getConversation, streamQuestion, listDocuments, createConversation, getMessageDebug } from '../api';
 import Citation from './Citation';
+
+const BugIcon = () => (
+  <svg
+    xmlns="http://www.w3.org/2000/svg"
+    viewBox="0 0 24 24"
+    fill="none"
+    stroke="currentColor"
+    strokeWidth={2}
+    strokeLinecap="round"
+    strokeLinejoin="round"
+    className="w-4 h-4"
+  >
+    <path d="m8 2 1.88 1.88" />
+    <path d="M14.12 3.88 16 2" />
+    <path d="M9 7.13v-1a3.003 3.003 0 1 1 6 0v1" />
+    <path d="M12 20c-3.3 0-6-2.7-6-6v-3a4 4 0 0 1 4-4h4a4 4 0 0 1 4 4v3c0 3.3-2.7 6-6 6" />
+    <path d="M12 20v-9" />
+    <path d="M6.53 9C4.6 8.8 3 7.1 3 5" />
+    <path d="M6 13H2" />
+    <path d="M3 21c0-2.1 1.7-3.9 3.8-4" />
+    <path d="M20.97 5c0 2.1-1.6 3.8-3.5 4" />
+    <path d="M22 13h-4" />
+    <path d="M17.2 17c2.1.1 3.8 1.9 3.8 4" />
+  </svg>
+);
 
 export default function Chat({ conversationId, onConversationsChange }) {
   const navigate = useNavigate();
@@ -13,6 +38,8 @@ export default function Chat({ conversationId, onConversationsChange }) {
   const [streaming, setStreaming] = useState(false);
   const [partialAnswer, setPartialAnswer] = useState('');
   const [partialSources, setPartialSources] = useState([]);
+  const [debugData, setDebugData] = useState(null);
+  const [debugLoading, setDebugLoading] = useState(false);
   const bottomRef = useRef(null);
 
   useEffect(() => {
@@ -94,6 +121,20 @@ export default function Chat({ conversationId, onConversationsChange }) {
     }
   };
 
+  const handleDebug = async (messageId) => {
+    if (!conversationId) return;
+    setDebugLoading(true);
+    setDebugData(null);
+    try {
+      const { data } = await getMessageDebug(conversationId, messageId);
+      setDebugData(data);
+    } catch (err) {
+      setDebugData({ error: err.response?.data?.detail || 'Failed to load debug context' });
+    } finally {
+      setDebugLoading(false);
+    }
+  };
+
   if (!hasDocs) {
     return (
       <div className="flex flex-col items-center justify-center h-full text-center p-8">
@@ -115,13 +156,22 @@ export default function Chat({ conversationId, onConversationsChange }) {
         {messages.map((msg) => (
           <div key={msg.id} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
             <div
-              className={`max-w-3xl rounded-2xl px-5 py-3 ${
+              className={`max-w-3xl rounded-2xl px-5 py-3 relative ${
                 msg.role === 'user'
                   ? 'bg-indigo-600 text-white rounded-br-none'
                   : 'bg-white border border-slate-200 text-slate-800 rounded-bl-none shadow-sm'
               }`}
             >
-              <p className="whitespace-pre-wrap">{msg.content}</p>
+              {msg.role === 'assistant' && msg.has_debug_context && (
+                <button
+                  onClick={() => handleDebug(msg.id)}
+                  title="Show LLM debug context"
+                  className="absolute top-2 right-2 p-1.5 text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 rounded-md transition"
+                >
+                  <BugIcon />
+                </button>
+              )}
+              <p className="whitespace-pre-wrap pr-6">{msg.content}</p>
               {msg.sources && msg.sources.length > 0 && (
                 <div className="mt-4 space-y-2">
                   <p className="text-xs font-semibold text-slate-500 uppercase tracking-wide">Sources</p>
@@ -138,6 +188,14 @@ export default function Chat({ conversationId, onConversationsChange }) {
           <div className="flex justify-start">
             <div className="max-w-3xl bg-white border border-slate-200 rounded-2xl rounded-bl-none px-5 py-3 shadow-sm">
               <p className="whitespace-pre-wrap">{partialAnswer}</p>
+              {partialSources.length > 0 && (
+                <div className="mt-4 space-y-2">
+                  <p className="text-xs font-semibold text-slate-500 uppercase tracking-wide">Sources</p>
+                  {partialSources.map((s, i) => (
+                    <Citation key={i} source={s} />
+                  ))}
+                </div>
+              )}
               <span className="inline-block mt-2 w-2 h-4 bg-indigo-500 animate-pulse" />
             </div>
           </div>
@@ -178,6 +236,56 @@ export default function Chat({ conversationId, onConversationsChange }) {
           </button>
         </div>
       </div>
+
+      {debugData && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
+          onClick={() => setDebugData(null)}
+        >
+          <div
+            className="bg-white rounded-xl shadow-xl w-full max-w-3xl max-h-[85vh] overflow-hidden flex flex-col"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between px-5 py-3 border-b border-slate-200">
+              <h3 className="text-lg font-semibold text-slate-800">LLM Debug Context</h3>
+              <button
+                onClick={() => setDebugData(null)}
+                className="text-slate-500 hover:text-slate-800 text-2xl leading-none"
+              >
+                &times;
+              </button>
+            </div>
+            <div className="overflow-y-auto p-5 space-y-4 text-sm">
+              {debugData.error ? (
+                <p className="text-red-600">{debugData.error}</p>
+              ) : (
+                <>
+                  <DebugSection title="System Prompt" content={debugData.system_prompt} />
+                  <DebugSection title="Question" content={debugData.question} />
+                  <DebugSection title="History" content={debugData.history} />
+                  <DebugSection title="Context" content={debugData.context} />
+                  <DebugSection title="Raw LLM Input" content={debugData.raw_input} />
+                  <DebugSection title="Raw LLM Response" content={debugData.raw_response} />
+                </>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function DebugSection({ title, content }) {
+  const isMissing = content === undefined;
+  return (
+    <div>
+      <h4 className="font-semibold text-slate-700 mb-1">{title}</h4>
+      <pre className="bg-slate-50 border border-slate-200 rounded-lg p-3 overflow-x-auto whitespace-pre-wrap text-slate-800 font-mono">
+        {isMissing
+          ? '(not captured — available for messages created after this feature was added; ask a new question)'
+          : content || '(empty)'}
+      </pre>
     </div>
   );
 }

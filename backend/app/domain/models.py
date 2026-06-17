@@ -45,6 +45,7 @@ class Message:
     role: str
     content: str
     sources: list[dict[str, Any]] | None
+    debug_context: dict[str, Any] | None = None
     created_at: datetime | None = None
 
 
@@ -73,3 +74,9 @@ class DocumentUploadResult:
     status: str
     chunks_inserted: int
     images_ignored: int = 0
+
+
+@dataclass(frozen=True)
+class LLMResponse:
+    content: str
+    debug_context: dict[str, Any]

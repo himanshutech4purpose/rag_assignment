@@ -4,17 +4,16 @@ import asyncio
 import dataclasses
 import uuid
 
-import asyncpg
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import Settings
-from app.database import transaction
 from app.logging_config import get_logger
-from app.models.domain import Chunk, DocumentUploadResult
+from app.domain import Chunk, DocumentUploadResult
 from app.repositories import chunk_repo, document_repo
-from app.services.chunker import split_text
-from app.services.embeddings import EmbeddingService
-from app.services.pdf_parser import extract_text
-from app.services.storage import StorageService
+from app.services.ingestion.chunker import split_text
+from app.services.ingestion.embeddings import EmbeddingService
+from app.services.ingestion.pdf_parser import extract_text
+from app.services.ingestion.storage import StorageService
 
 logger = get_logger(__name__)
 
@@ -34,6 +33,7 @@ class IngestionService:
 
     async def ingest(
         self,
+        session: AsyncSession,
         filename: str,
         content: bytes,
         chunk_size: int | None = None,
@@ -47,30 +47,29 @@ class IngestionService:
         await self._storage.upload(object_name, content)
 
         try:
-            async with transaction() as conn:
-                await document_repo.create(
-                    conn,
-                    document_id=document_id,
-                    name=filename,
-                    size_bytes=len(content),
-                    minio_object=object_name,
-                    status="processing",
-                )
+            await document_repo.create(
+                session,
+                document_id=document_id,
+                name=filename,
+                size_bytes=len(content),
+                minio_object=object_name,
+                status="processing",
+            )
 
-                pages, images_ignored = await self._extract_pages(content)
-                chunks = self._build_chunks(
-                    document_id, filename, pages, effective_chunk_size, effective_chunk_overlap
-                )
+            pages, images_ignored = await self._extract_pages(content)
+            chunks = self._build_chunks(
+                document_id, filename, pages, effective_chunk_size, effective_chunk_overlap
+            )
 
-                if chunks:
-                    embeddings = await self._embeddings.embed([c.content for c in chunks])
-                    chunks = [
-                        dataclasses.replace(chunk, embedding=embedding)
-                        for chunk, embedding in zip(chunks, embeddings)
-                    ]
-                    await chunk_repo.insert_many(conn, chunks)
+            if chunks:
+                embeddings = await self._embeddings.embed([c.content for c in chunks])
+                chunks = [
+                    dataclasses.replace(chunk, embedding=embedding)
+                    for chunk, embedding in zip(chunks, embeddings)
+                ]
+                await chunk_repo.insert_many(session, chunks)
 
-                await document_repo.update_status(conn, document_id, "indexed")
+            await document_repo.update_status(session, document_id, "indexed")
 
             logger.info(
                 "Ingested document %s with %d chunks, %d image(s) ignored",
@@ -94,14 +93,16 @@ class IngestionService:
                 logger.exception("Failed to clean up object %s after ingestion error", object_name)
             raise
 
-    async def delete_document(self, conn: asyncpg.Connection, document_id: uuid.UUID) -> None:
+    async def delete_document(
+        self, session: AsyncSession, document_id: uuid.UUID
+    ) -> None:
         """Delete a document and its stored object.
 
         Storage is deleted after the database transaction succeeds so that a
         failed DB delete does not leave an orphaned database record.
         """
-        object_name = await document_repo.get_object_name(conn, document_id)
-        await document_repo.delete(conn, document_id)
+        object_name = await document_repo.get_object_name(session, document_id)
+        await document_repo.delete(session, document_id)
         await self._storage.delete(object_name)
 
     async def _extract_pages(self, content: bytes) -> tuple[list[dict], int]:

@@ -11,12 +11,13 @@ from langchain_openai import ChatOpenAI
 from app.config import Settings
 from app.exceptions import LLMServiceError
 from app.logging_config import get_logger
-from app.models.domain import Message, RetrievedChunk
+from app.domain import LLMResponse, Message, RetrievedChunk
 
 logger = get_logger(__name__)
 
-DEFAULT_SYSTEM_PROMPT = """You are a helpful assistant. Use ONLY the following context to answer the question.
-Cite the source document name, page number, and chunk index for each fact you use.
+DEFAULT_SYSTEM_PROMPT = """You are a helpful assistant. Answer the question using the provided context and previous conversation.
+If the question asks about earlier parts of the conversation, use the previous conversation.
+Cite the source document name, page number, and chunk index for each fact you use from the context.
 
 Context:
 {context}
@@ -45,6 +46,28 @@ def format_history(messages: list[Message]) -> str:
     return "\n\n".join(
         f"{'User' if m.role == 'user' else 'Assistant'}: {m.content}" for m in messages
     )
+
+
+def build_debug_context(
+    system_prompt: str | None,
+    context: str,
+    history_text: str,
+    question: str,
+    raw_response: str,
+) -> dict:
+    """Capture the exact inputs and raw output sent to the LLM for debugging."""
+    prompt = build_prompt(system_prompt)
+    raw_input = prompt.format(
+        context=context, history=history_text, question=question
+    )
+    return {
+        "system_prompt": system_prompt or DEFAULT_SYSTEM_PROMPT,
+        "context": context,
+        "history": history_text,
+        "question": question,
+        "raw_input": raw_input,
+        "raw_response": raw_response,
+    }
 
 
 class LLMService:
@@ -94,7 +117,7 @@ class LLMService:
         api_key: str | None = None,
         system_prompt: str | None = None,
         max_tokens: int | None = None,
-    ) -> str:
+    ) -> LLMResponse:
         context = format_context(chunks)
         history_text = format_history(history)
         prompt = build_prompt(system_prompt)
@@ -106,7 +129,11 @@ class LLMService:
                 chain.invoke,
                 {"context": context, "history": history_text, "question": question},
             )
-            return str(response.content)
+            content = str(response.content)
+            debug_context = build_debug_context(
+                system_prompt, context, history_text, question, content
+            )
+            return LLMResponse(content=content, debug_context=debug_context)
         except Exception as exc:
             logger.exception("LLM invoke failed")
             raise LLMServiceError(f"LLM invoke failed: {exc}") from exc

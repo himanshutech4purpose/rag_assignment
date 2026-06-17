@@ -59,6 +59,7 @@ class MessageOut(BaseModel):
     role: str
     content: str
     sources: list[dict[str, Any]] | None
+    has_debug_context: bool = False
     created_at: datetime
 
 

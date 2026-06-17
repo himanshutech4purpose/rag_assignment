@@ -4,9 +4,9 @@ import uuid
 from fastapi import APIRouter, File, Query, UploadFile
 
 from app.config import get_settings
-from app.dependencies import DBConnection, IngestionDep
+from app.dependencies import DBSession, IngestionDep
 from app.exceptions import ValidationError
-from app.models.schemas import ChunkOut, DocumentsList, UploadResponse
+from app.schemas import ChunkOut, DocumentsList, UploadResponse
 from app.repositories import chunk_repo, document_repo
 
 router = APIRouter(tags=["documents"])
@@ -14,6 +14,7 @@ router = APIRouter(tags=["documents"])
 
 @router.post("/upload", response_model=UploadResponse)
 async def upload_documents(
+    session: DBSession,
     ingestion_service: IngestionDep,
     files: list[UploadFile] = File(...),
     chunk_size: int | None = Query(None, ge=100, le=4000),
@@ -40,26 +41,30 @@ async def upload_documents(
                 f"File exceeds {settings.max_upload_file_size // (1024 * 1024)}MB limit"
             )
 
-        result = await ingestion_service.ingest(
-            filename=file.filename,
-            content=contents,
-            chunk_size=chunk_size,
-            chunk_overlap=chunk_overlap,
-        )
+        # Each file is ingested in its own savepoint so a failure in one file
+        # does not roll back previously successful uploads.
+        async with session.begin():
+            result = await ingestion_service.ingest(
+                session,
+                filename=file.filename,
+                content=contents,
+                chunk_size=chunk_size,
+                chunk_overlap=chunk_overlap,
+            )
         results.append(result)
 
     return {"documents": results}
 
 
 @router.get("/documents", response_model=DocumentsList)
-async def list_documents(conn: DBConnection):
-    documents = await document_repo.list_all(conn)
+async def list_documents(session: DBSession):
+    documents = await document_repo.list_all(session)
     return {"documents": documents}
 
 
 @router.get("/documents/{document_id}/chunks", response_model=list[ChunkOut])
 async def list_document_chunks(
-    conn: DBConnection,
+    session: DBSession,
     document_id: str,
 ):
     try:
@@ -67,7 +72,7 @@ async def list_document_chunks(
     except ValueError as exc:
         raise ValidationError("Invalid document_id format") from exc
 
-    chunks = await chunk_repo.get_by_document(conn, doc_id)
+    chunks = await chunk_repo.get_by_document(session, doc_id)
     return [
         {
             "id": c.id,
@@ -82,7 +87,7 @@ async def list_document_chunks(
 
 @router.delete("/documents/{document_id}")
 async def delete_document(
-    conn: DBConnection,
+    session: DBSession,
     ingestion_service: IngestionDep,
     document_id: str,
 ):
@@ -91,5 +96,5 @@ async def delete_document(
     except ValueError as exc:
         raise ValidationError("Invalid document_id format") from exc
 
-    await ingestion_service.delete_document(conn, doc_id)
+    await ingestion_service.delete_document(session, doc_id)
     return {"message": "Document deleted successfully"}

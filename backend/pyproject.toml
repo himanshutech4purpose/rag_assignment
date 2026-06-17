@@ -22,6 +22,7 @@ dependencies = [
     "langchain-community==0.2.5",
     "alembic==1.13.2",
     "sqlalchemy[asyncio]==2.0.31",
+    "pgvector==0.4.2",
 ]
 
 [tool.setuptools.packages.find]

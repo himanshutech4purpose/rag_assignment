@@ -6,7 +6,7 @@ from sentence_transformers import CrossEncoder
 
 from app.config import Settings
 from app.logging_config import get_logger
-from app.models.domain import RetrievedChunk
+from app.domain import RetrievedChunk
 
 logger = get_logger(__name__)
 

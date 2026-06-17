@@ -4,7 +4,7 @@ from fastapi import Request
 from fastapi.responses import JSONResponse
 
 from app.logging_config import get_logger
-from app.models.schemas import ErrorResponse
+from app.schemas import ErrorResponse
 
 logger = get_logger(__name__)
 
