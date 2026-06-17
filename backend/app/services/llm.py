@@ -15,6 +15,13 @@ from app.domain import LLMResponse, Message, RetrievedChunk
 
 logger = get_logger(__name__)
 
+MODEL_MAX_TOKENS: dict[str, int] = {
+    "llama-3.1-8b-instant": 8192,
+    "mixtral-8x7b-32768": 32768,
+    "gpt-4o-mini": 8192,
+    "gpt-4o": 16384,
+}
+
 DEFAULT_SYSTEM_PROMPT = """You are a helpful assistant. Answer the question using the provided context and previous conversation.
 If the question asks about earlier parts of the conversation, use the previous conversation.
 Cite the source document name, page number, and chunk index for each fact you use from the context.
@@ -84,9 +91,13 @@ class LLMService:
         max_tokens: int | None = None,
     ) -> BaseChatModel:
         provider = provider.lower()
+        resolved_model = model or (
+            self._settings.llm_model if provider == "groq" else self._settings.openai_model
+        )
         extra_kwargs = {}
         if max_tokens is not None:
-            extra_kwargs["max_tokens"] = max_tokens
+            cap = MODEL_MAX_TOKENS.get(resolved_model, 8192)
+            extra_kwargs["max_tokens"] = min(max_tokens, cap)
 
         if provider == "groq":
             return ChatGroq(

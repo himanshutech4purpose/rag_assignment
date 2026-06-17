@@ -206,8 +206,10 @@ async def ask_stream(
 
                 yield f"event: sources\ndata: {json.dumps(sources)}\n\n"
                 yield "data: [DONE]\n\n"
-            except LLMServiceError:
-                yield "event: error\ndata: {\"error\": \"LLM service temporarily unavailable\"}\n\n"
+            except LLMServiceError as exc:
+                logger.exception("LLM error during streaming (conversation_id=%s)", conversation_id)
+                detail = str(exc) or "LLM service temporarily unavailable"
+                yield f"event: error\ndata: {json.dumps({'error': detail})}\n\n"
             except Exception:
                 logger.exception("Unexpected error during streaming (conversation_id=%s)", conversation_id)
                 yield "event: error\ndata: {\"error\": \"An unexpected error occurred\"}\n\n"

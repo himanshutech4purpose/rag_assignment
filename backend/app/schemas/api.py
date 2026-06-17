@@ -73,7 +73,7 @@ class AskRequest(BaseModel):
     model: str | None = None
     api_key: str | None = None
     system_prompt: str | None = None
-    max_tokens: int | None = Field(None, ge=1, le=8192)
+    max_tokens: int | None = Field(None, ge=1, le=16384)
     history_limit: int | None = Field(None, ge=1, le=50)
 
 

@@ -47,9 +47,9 @@ class Settings(BaseSettings):
 
     # Retrieval
     top_k: int = 5
-    semantic_top_k: int = 20
-    lexical_top_k: int = 20
-    rerank_top_k: int = 5
+    semantic_top_k: int = 40
+    lexical_top_k: int = 40
+    rerank_top_k: int = 8
     rrf_k: int = 60
     reranker_model: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"
 

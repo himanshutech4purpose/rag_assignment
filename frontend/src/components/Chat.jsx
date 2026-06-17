@@ -1,7 +1,13 @@
 import { useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { getConversation, streamQuestion, listDocuments, createConversation, getMessageDebug } from '../api';
+import { MODEL_MAX_TOKENS, DEFAULT_MAX_TOKENS } from '../pages/SettingsPage';
 import Citation from './Citation';
+
+const PROVIDERS = {
+  groq: { label: 'Groq', models: ['llama-3.1-8b-instant', 'mixtral-8x7b-32768'] },
+  openai: { label: 'OpenAI', models: ['gpt-4o-mini', 'gpt-4o'] },
+};
 
 const BugIcon = () => (
   <svg
@@ -41,6 +47,17 @@ export default function Chat({ conversationId, onConversationsChange }) {
   const [debugData, setDebugData] = useState(null);
   const [debugLoading, setDebugLoading] = useState(false);
   const bottomRef = useRef(null);
+  const llmPopoverRef = useRef(null);
+
+  const [llmProvider, setLlmProvider] = useState(
+    () => localStorage.getItem('llm_provider') || 'groq'
+  );
+  const [llmModel, setLlmModel] = useState(() => {
+    const p = localStorage.getItem('llm_provider') || 'groq';
+    const stored = localStorage.getItem('llm_model');
+    return stored && PROVIDERS[p]?.models.includes(stored) ? stored : PROVIDERS[p]?.models[0];
+  });
+  const [showLlmPicker, setShowLlmPicker] = useState(false);
 
   useEffect(() => {
     listDocuments().then(({ data }) => setHasDocs(data.documents.length > 0));
@@ -58,24 +75,52 @@ export default function Chat({ conversationId, onConversationsChange }) {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages, partialAnswer]);
 
+  useEffect(() => {
+    if (!showLlmPicker) return;
+    const handleClickOutside = (e) => {
+      if (llmPopoverRef.current && !llmPopoverRef.current.contains(e.target)) {
+        setShowLlmPicker(false);
+      }
+    };
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, [showLlmPicker]);
+
+  const handleLlmProviderChange = (newProvider) => {
+    const defaultModel = PROVIDERS[newProvider].models[0];
+    setLlmProvider(newProvider);
+    setLlmModel(defaultModel);
+    localStorage.setItem('llm_provider', newProvider);
+    localStorage.setItem('llm_model', defaultModel);
+  };
+
+  const handleLlmModelChange = (newModel) => {
+    setLlmModel(newModel);
+    localStorage.setItem('llm_model', newModel);
+  };
+
   const handleAsk = async () => {
     if (!question.trim()) return;
 
     let convId = conversationId;
+    let isNewConversation = false;
     if (!convId) {
       const { data } = await createConversation(question.slice(0, 40));
       convId = data.id;
-      navigate(`/chat/${convId}`);
+      isNewConversation = true;
       onConversationsChange();
+      // Navigate AFTER streaming to avoid unmounting this component mid-stream.
     }
 
     const currentQuestion = question;
-    const provider = localStorage.getItem('llm_provider') || 'groq';
-    const model = localStorage.getItem('llm_model') || undefined;
-    const apiKey = localStorage.getItem('llm_api_key') || undefined;
+    const provider = llmProvider;
+    const model = llmModel || undefined;
+    const apiKey = localStorage.getItem(`llm_api_key_${provider}`) || undefined;
     const systemPrompt = localStorage.getItem('rag_system_prompt') || undefined;
-    const maxTokens = localStorage.getItem('rag_max_tokens')
-      ? parseInt(localStorage.getItem('rag_max_tokens'), 10)
+    const modelMax = MODEL_MAX_TOKENS[model] ?? DEFAULT_MAX_TOKENS;
+    const savedTokens = localStorage.getItem('rag_max_tokens');
+    const maxTokens = savedTokens
+      ? Math.min(parseInt(savedTokens, 10) || modelMax, modelMax)
       : undefined;
     const historyLimit = localStorage.getItem('rag_history_limit')
       ? parseInt(localStorage.getItem('rag_history_limit'), 10)
@@ -87,6 +132,19 @@ export default function Chat({ conversationId, onConversationsChange }) {
     setError(null);
     setPartialAnswer('');
     setPartialSources([]);
+
+    // Optimistically add the user message so it appears immediately.
+    setMessages((prev) => [
+      ...prev,
+      {
+        id: `optimistic-${Date.now()}`,
+        role: 'user',
+        content: currentQuestion,
+        sources: null,
+        has_debug_context: false,
+        created_at: new Date().toISOString(),
+      },
+    ]);
 
     await streamQuestion(convId, currentQuestion, {
       provider,
@@ -104,6 +162,9 @@ export default function Chat({ conversationId, onConversationsChange }) {
         setPartialSources([]);
         getConversation(convId).then(({ data }) => setMessages(data.messages));
         onConversationsChange();
+        if (isNewConversation) {
+          navigate(`/chat/${convId}`);
+        }
       },
       onError: (err) => {
         setStreaming(false);
@@ -217,23 +278,77 @@ export default function Chat({ conversationId, onConversationsChange }) {
       </div>
 
       <div className="p-4 border-t border-slate-200 bg-white">
-        <div className="flex gap-3 max-w-4xl mx-auto">
-          <input
-            type="text"
-            value={question}
-            onChange={(e) => setQuestion(e.target.value)}
-            onKeyDown={(e) => e.key === 'Enter' && !loading && handleAsk()}
-            disabled={loading}
-            placeholder="Ask a question about your documents..."
-            className="flex-1 border border-slate-300 rounded-lg px-4 py-3 focus:outline-none focus:ring-2 focus:ring-indigo-500 disabled:bg-slate-100"
-          />
-          <button
-            onClick={handleAsk}
-            disabled={loading || !question.trim()}
-            className="px-6 py-3 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed"
-          >
-            Ask
-          </button>
+        <div className="max-w-4xl mx-auto">
+          <div className="flex items-center justify-between mb-2">
+            <div className="relative" ref={llmPopoverRef}>
+              <button
+                type="button"
+                onClick={() => setShowLlmPicker((v) => !v)}
+                className="flex items-center gap-1.5 text-xs font-medium text-slate-600 bg-slate-100 hover:bg-slate-200 px-2.5 py-1 rounded-full transition"
+                title="Click to change LLM"
+              >
+                <span className="w-1.5 h-1.5 rounded-full bg-green-500 inline-block" />
+                <span>{PROVIDERS[llmProvider]?.label ?? llmProvider}</span>
+                <span className="text-slate-400">/</span>
+                <span>{llmModel}</span>
+                <svg className="w-3 h-3 text-slate-400 ml-0.5" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
+                </svg>
+              </button>
+
+              {showLlmPicker && (
+                <div className="absolute bottom-full mb-2 left-0 z-20 bg-white border border-slate-200 rounded-xl shadow-lg p-4 w-64">
+                  <p className="text-xs font-semibold text-slate-500 uppercase tracking-wide mb-2">Provider</p>
+                  <div className="flex gap-2 mb-3">
+                    {Object.entries(PROVIDERS).map(([key, { label }]) => (
+                      <button
+                        key={key}
+                        type="button"
+                        onClick={() => handleLlmProviderChange(key)}
+                        className={`flex-1 px-3 py-1.5 rounded-lg border text-sm font-medium transition ${
+                          llmProvider === key
+                            ? 'bg-indigo-600 text-white border-indigo-600'
+                            : 'bg-white text-slate-700 border-slate-300 hover:bg-slate-50'
+                        }`}
+                      >
+                        {label}
+                      </button>
+                    ))}
+                  </div>
+                  <p className="text-xs font-semibold text-slate-500 uppercase tracking-wide mb-2">Model</p>
+                  <select
+                    value={llmModel}
+                    onChange={(e) => handleLlmModelChange(e.target.value)}
+                    className="w-full border border-slate-300 rounded-lg px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 bg-white"
+                  >
+                    {PROVIDERS[llmProvider]?.models.map((m) => (
+                      <option key={m} value={m}>{m}</option>
+                    ))}
+                  </select>
+                  <p className="mt-2 text-xs text-slate-400">Changes apply to the next message.</p>
+                </div>
+              )}
+            </div>
+          </div>
+
+          <div className="flex gap-3">
+            <input
+              type="text"
+              value={question}
+              onChange={(e) => setQuestion(e.target.value)}
+              onKeyDown={(e) => e.key === 'Enter' && !loading && handleAsk()}
+              disabled={loading}
+              placeholder="Ask a question about your documents..."
+              className="flex-1 border border-slate-300 rounded-lg px-4 py-3 focus:outline-none focus:ring-2 focus:ring-indigo-500 disabled:bg-slate-100"
+            />
+            <button
+              onClick={handleAsk}
+              disabled={loading || !question.trim()}
+              className="px-6 py-3 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              Ask
+            </button>
+          </div>
         </div>
       </div>
 

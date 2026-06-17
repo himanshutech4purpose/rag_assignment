@@ -1,5 +1,12 @@
 import { useEffect, useState } from 'react';
 
+export const MODEL_MAX_TOKENS = {
+  'llama-3.1-8b-instant': 8192,
+  'mixtral-8x7b-32768': 32768,
+  'gpt-4o-mini': 8192,
+  'gpt-4o': 16384,
+};
+
 const PROVIDERS = {
   groq: {
     label: 'Groq',
@@ -14,13 +21,14 @@ const PROVIDERS = {
 const STORAGE_KEYS = {
   provider: 'llm_provider',
   model: 'llm_model',
-  apiKey: 'llm_api_key',
   systemPrompt: 'rag_system_prompt',
   chunkSize: 'rag_chunk_size',
   chunkOverlap: 'rag_chunk_overlap',
   maxTokens: 'rag_max_tokens',
   historyLimit: 'rag_history_limit',
 };
+
+const apiKeyFor = (provider) => `llm_api_key_${provider}`;
 
 export const DEFAULT_SYSTEM_PROMPT = `You are a helpful assistant. Answer the question using the provided context and previous conversation.
 If the question asks about earlier parts of the conversation, use the previous conversation.
@@ -38,7 +46,7 @@ Answer:`;
 
 export const DEFAULT_CHUNK_SIZE = 1000;
 export const DEFAULT_CHUNK_OVERLAP = 200;
-export const DEFAULT_MAX_TOKENS = 4096;
+export const DEFAULT_MAX_TOKENS = MODEL_MAX_TOKENS['llama-3.1-8b-instant'];
 export const DEFAULT_HISTORY_LIMIT = 2;
 
 function parseIntOrDefault(value, defaultValue) {
@@ -60,23 +68,34 @@ export default function SettingsPage() {
 
   useEffect(() => {
     const storedProvider = localStorage.getItem(STORAGE_KEYS.provider) || 'groq';
-    const storedApiKey = localStorage.getItem(STORAGE_KEYS.apiKey) || '';
+    const storedApiKey = localStorage.getItem(apiKeyFor(storedProvider)) || '';
     const defaultModel = PROVIDERS[storedProvider].models[0];
     const storedModel = localStorage.getItem(STORAGE_KEYS.model) || defaultModel;
 
+    const resolvedModel = PROVIDERS[storedProvider].models.includes(storedModel) ? storedModel : defaultModel;
     setProvider(storedProvider);
-    setModel(PROVIDERS[storedProvider].models.includes(storedModel) ? storedModel : defaultModel);
+    setModel(resolvedModel);
     setApiKey(storedApiKey);
     setSystemPrompt(localStorage.getItem(STORAGE_KEYS.systemPrompt) || DEFAULT_SYSTEM_PROMPT);
     setChunkSize(parseIntOrDefault(localStorage.getItem(STORAGE_KEYS.chunkSize), DEFAULT_CHUNK_SIZE));
     setChunkOverlap(parseIntOrDefault(localStorage.getItem(STORAGE_KEYS.chunkOverlap), DEFAULT_CHUNK_OVERLAP));
-    setMaxTokens(parseIntOrDefault(localStorage.getItem(STORAGE_KEYS.maxTokens), DEFAULT_MAX_TOKENS));
+    const savedMax = localStorage.getItem(STORAGE_KEYS.maxTokens);
+    setMaxTokens(savedMax ? parseIntOrDefault(savedMax, DEFAULT_MAX_TOKENS) : (MODEL_MAX_TOKENS[resolvedModel] ?? DEFAULT_MAX_TOKENS));
     setHistoryLimit(parseIntOrDefault(localStorage.getItem(STORAGE_KEYS.historyLimit), DEFAULT_HISTORY_LIMIT));
   }, []);
 
   const handleProviderChange = (newProvider) => {
     setProvider(newProvider);
-    setModel(PROVIDERS[newProvider].models[0]);
+    const defaultModel = PROVIDERS[newProvider].models[0];
+    setModel(defaultModel);
+    setMaxTokens(MODEL_MAX_TOKENS[defaultModel] ?? DEFAULT_MAX_TOKENS);
+    setApiKey(localStorage.getItem(apiKeyFor(newProvider)) || '');
+    setSaved(false);
+  };
+
+  const handleModelChange = (newModel) => {
+    setModel(newModel);
+    setMaxTokens(MODEL_MAX_TOKENS[newModel] ?? DEFAULT_MAX_TOKENS);
     setSaved(false);
   };
 
@@ -84,7 +103,7 @@ export default function SettingsPage() {
     e.preventDefault();
     localStorage.setItem(STORAGE_KEYS.provider, provider);
     localStorage.setItem(STORAGE_KEYS.model, model);
-    localStorage.setItem(STORAGE_KEYS.apiKey, apiKey.trim());
+    localStorage.setItem(apiKeyFor(provider), apiKey.trim());
     localStorage.setItem(STORAGE_KEYS.systemPrompt, systemPrompt.trim());
     localStorage.setItem(STORAGE_KEYS.chunkSize, String(chunkSize));
     localStorage.setItem(STORAGE_KEYS.chunkOverlap, String(chunkOverlap));
@@ -98,7 +117,7 @@ export default function SettingsPage() {
     setSystemPrompt(DEFAULT_SYSTEM_PROMPT);
     setChunkSize(DEFAULT_CHUNK_SIZE);
     setChunkOverlap(DEFAULT_CHUNK_OVERLAP);
-    setMaxTokens(DEFAULT_MAX_TOKENS);
+    setMaxTokens(MODEL_MAX_TOKENS[model] ?? DEFAULT_MAX_TOKENS);
     setHistoryLimit(DEFAULT_HISTORY_LIMIT);
     setSaved(false);
   };
@@ -172,10 +191,7 @@ export default function SettingsPage() {
           <select
             id="model"
             value={model}
-            onChange={(e) => {
-              setModel(e.target.value);
-              setSaved(false);
-            }}
+            onChange={(e) => handleModelChange(e.target.value)}
             className="w-full border border-slate-300 rounded-lg px-4 py-2.5 focus:outline-none focus:ring-2 focus:ring-indigo-500 bg-white"
           >
             {PROVIDERS[provider].models.map((m) => (
@@ -217,7 +233,7 @@ export default function SettingsPage() {
             id="maxTokens"
             type="number"
             min={1}
-            max={8192}
+            max={MODEL_MAX_TOKENS[model] ?? 32768}
             value={maxTokens}
             onChange={(e) => {
               setMaxTokens(parseIntOrDefault(e.target.value, DEFAULT_MAX_TOKENS));
@@ -226,7 +242,8 @@ export default function SettingsPage() {
             className="w-full border border-slate-300 rounded-lg px-4 py-2.5 focus:outline-none focus:ring-2 focus:ring-indigo-500"
           />
           <p className="mt-1.5 text-xs text-slate-500">
-            Maximum number of tokens the LLM can generate per answer. Default is {DEFAULT_MAX_TOKENS}.
+            Maximum tokens the LLM can generate. Model max for <strong>{model || '…'}</strong> is{' '}
+            <strong>{(MODEL_MAX_TOKENS[model] ?? 32768).toLocaleString()}</strong>.
           </p>
         </div>
 
